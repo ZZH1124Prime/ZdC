@@ -1,0 +1,35 @@
+# .NET / WPF build outputs
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+*.nupkg
+*.snupkg
+
+# Visual Studio per-user state
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Local secrets and signing files
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Keep shared VS Code settings, tasks and launch configurations tracked.
+# .vscode/ is intentionally not ignored.
