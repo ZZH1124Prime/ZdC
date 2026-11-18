@@ -1939,9 +1939,24 @@ struct ImageIdentity
 {
     std::wstring path;
     std::array<BYTE, 32> signer{};
+    std::array<BYTE, 32> issuer{};
+    std::wstring publisherName, publisherOrganization, publisherCountry;
+    bool publisherVerified = false;
     BY_HANDLE_FILE_INFORMATION file{};
     bool trusted = false;
 };
+
+std::wstring ReadCertificateAttribute(PCCERT_CONTEXT certificate, const char *oid)
+{
+    const DWORD size = CertGetNameStringW(certificate, CERT_NAME_ATTR_TYPE, 0,
+        const_cast<char *>(oid), nullptr, 0);
+    if (size <= 1 || size > 1024) return {};
+    std::wstring value(size, L'\0');
+    if (CertGetNameStringW(certificate, CERT_NAME_ATTR_TYPE, 0,
+        const_cast<char *>(oid), value.data(), size) != size) return {};
+    value.resize(size - 1);
+    return value;
+}
 
 bool ReadImageIdentity(const wchar_t *path, ImageIdentity &result)
 {
@@ -1976,6 +1991,16 @@ bool ReadImageIdentity(const wchar_t *path, ImageIdentity &result)
     trust.pFile = &info; trust.dwStateAction = WTD_STATEACTION_VERIFY;
     trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
     GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    struct CloseTrustState
+    {
+        GUID *action;
+        WINTRUST_DATA *trust;
+        ~CloseTrustState()
+        {
+            trust->dwStateAction = WTD_STATEACTION_CLOSE;
+            WinVerifyTrust(nullptr, action, trust);
+        }
+    } closeTrust{&action, &trust};
     const LONG status = WinVerifyTrust(nullptr, &action, &trust);
     if (status == ERROR_SUCCESS)
     {
@@ -1985,9 +2010,24 @@ bool ReadImageIdentity(const wchar_t *path, ImageIdentity &result)
         DWORD bytes = static_cast<DWORD>(result.signer.size());
         result.trusted = cert && CryptHashCertificate2(BCRYPT_SHA256_ALGORITHM, 0, nullptr,
             cert->pbCertEncoded, cert->cbCertEncoded, result.signer.data(), &bytes) && bytes == result.signer.size();
+        if (result.trusted && signer->csCertChain > 1)
+        {
+            // A verified publisher can renew its leaf certificate. Require the same
+            // actual issuing CA and exact signed CN/O/C, not a file's company text.
+            auto issuer = signer->pasCertChain[1].pCert;
+            bytes = static_cast<DWORD>(result.issuer.size());
+            if (issuer && CryptHashCertificate2(BCRYPT_SHA256_ALGORITHM, 0, nullptr,
+                issuer->pbCertEncoded, issuer->cbCertEncoded, result.issuer.data(), &bytes) &&
+                bytes == result.issuer.size())
+            {
+                result.publisherName = ReadCertificateAttribute(cert, szOID_COMMON_NAME);
+                result.publisherOrganization = ReadCertificateAttribute(cert, szOID_ORGANIZATION_NAME);
+                result.publisherCountry = ReadCertificateAttribute(cert, szOID_COUNTRY_NAME);
+                result.publisherVerified = !result.publisherName.empty() &&
+                    !result.publisherOrganization.empty() && !result.publisherCountry.empty();
+            }
+        }
     }
-    trust.dwStateAction = WTD_STATEACTION_CLOSE;
-    WinVerifyTrust(nullptr, &action, &trust);
     {
         std::lock_guard<std::mutex> lock(gate);
         cache[cursor++ % cache.size()] = result;
@@ -2027,7 +2067,11 @@ bool IsSignedInstallationChild(const wchar_t *mainImage, const wchar_t *childIma
         if (_wcsnicmp(directory.c_str(), windowsRoot.c_str(), windowsRoot.size()) == 0) return false;
         return child.path.size() > directory.size() &&
             _wcsnicmp(child.path.c_str(), directory.c_str(), directory.size()) == 0 &&
-            main.signer == child.signer;
+            (main.signer == child.signer ||
+             (main.publisherVerified && child.publisherVerified && main.issuer == child.issuer &&
+              main.publisherName == child.publisherName &&
+              main.publisherOrganization == child.publisherOrganization &&
+              main.publisherCountry == child.publisherCountry));
     }
     catch (...) { return false; }
 }
