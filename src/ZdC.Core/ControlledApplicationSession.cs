@@ -181,7 +181,7 @@ public sealed class ControlledApplicationSession : IAsyncDisposable
                 var registered = false;
                 for (var attempt = 0; attempt < 40; attempt++)
                 {
-                    if (_lease.LiveMembers().Any(member => member.Pid == id)) { registered = true; break; }
+                    if (_lease.WasRegistered(id)) { registered = true; break; }
                     await Task.Delay(50, cancellationToken).ConfigureAwait(false);
                 }
                 if (!registered) throw new System.ComponentModel.Win32Exception(1114);

@@ -99,6 +99,20 @@ internal sealed unsafe class ApplicationControlLease : IDisposable
         }
         return result;
     }
+    public bool WasRegistered(int processId)
+    {
+        // A short-lived launcher can finish before the first UI-side poll.
+        // Its entry in this freshly created lease still proves DLL initialization.
+        for (var i = 0; i < 256; i++)
+        {
+            var member = _pointer + 64 + i * 16;
+            var pid = Volatile.Read(ref *(int*)member);
+            var created = *(long*)(member + 8);
+            Thread.MemoryBarrier();
+            if (pid == processId && created > 0 && pid == Volatile.Read(ref *(int*)member)) return true;
+        }
+        return false;
+    }
     private static long CurrentCreated() { using var p = Process.GetCurrentProcess(); return p.StartTime.ToUniversalTime().ToFileTimeUtc(); }
     internal static bool Alive(int pid, long created, bool uncertainAlive = true)
     {

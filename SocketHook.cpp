@@ -1,4 +1,4 @@
-﻿// 拦截 DLL：接管指定进程的同步解析，以及 connect / ConnectEx 出站连接。
+// 拦截 DLL：接管指定进程的同步解析，以及 connect / ConnectEx 出站连接。
 // getaddrinfo 收到域名后，通过绑定物理网卡的独立 UDP socket 查询真实 DNS。
 // connect 建立连接前绑定同一物理出口；开关关闭或控制器退出后调用原 API。
 // 覆盖 IPv4 TCP、经 connect 建立的 IPv4 UDP 和同步解析；异步 DNS 仍透传。
@@ -42,6 +42,7 @@
 #include <unordered_map>
 #pragma comment(lib, "bcrypt.lib")
 
+bool AttachWinInetRouting(bool (*enabled)());
 // ==================== 3. DLL：解析与连接调用的实时接管 ====================
 namespace
 {
@@ -63,6 +64,13 @@ auto OriginalFreeAddrInfoExW = &FreeAddrInfoExW;
 auto OriginalWinHttpConnect = &WinHttpConnect;
 auto OriginalGetIEProxyConfig = &WinHttpGetIEProxyConfigForCurrentUser;
 auto OriginalDnsQueryW = &DnsQuery_W;
+auto OriginalDnsQueryA = &DnsQuery_A;
+auto OriginalDnsQueryEx = &DnsQueryEx;
+auto OriginalGetAddrInfoW = &GetAddrInfoW;
+#pragma warning(push)
+#pragma warning(disable : 4996) // Observe existing applications' legacy resolver calls.
+auto OriginalGetHostByName = &gethostbyname;
+#pragma warning(pop)
 
 std::string ReadEnvironmentValue(const char *name)
 {
@@ -127,21 +135,29 @@ void RetainControlLease()
         CloseHandle(controlMapping); controlMapping = nullptr;
         return;
     }
+    name[0] = 0;
+    if (GetEnvironmentVariableA("ZDC_TIMING_MAP", name, sizeof(name)))
+        retainedTimingMapping = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
+}
+
+void RegisterInstalledMember()
+{
+    if (!controlLease) return;
     FILETIME created{}, exited{}, kernel{}, user{};
     if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return;
     const ULONGLONG stamp = (static_cast<ULONGLONG>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
     for (auto &member : controlLease->members)
     {
         LONG old = InterlockedCompareExchange(&member.pid, 0, 0);
-        if (old > 0 && ProcessIdentityAlive(static_cast<DWORD>(old), member.created)) continue;
+        // Preserve the root's first registration even after a short launcher
+        // exits; later members can recycle the remaining identity slots.
+        if (old > 0 && (&member == &controlLease->members[0] ||
+            ProcessIdentityAlive(static_cast<DWORD>(old), member.created))) continue;
         if (old < 0 || InterlockedCompareExchange(&member.pid, -1, old) != old) continue;
         member.created = stamp;
         InterlockedExchange(&member.pid, static_cast<LONG>(GetCurrentProcessId()));
         break;
     }
-    name[0] = 0;
-    if (GetEnvironmentVariableA("ZDC_TIMING_MAP", name, sizeof(name)))
-        retainedTimingMapping = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name);
 }
 struct LeaseOwnerHandle
 {
@@ -351,6 +367,8 @@ DNS_STATUS WINAPI HookDnsQueryW(PCWSTR name, WORD type, DWORD options, PVOID ext
                                PDNS_RECORD *records, PVOID *reserved)
 {
     const DNS_STATUS status = OriginalDnsQueryW(name, type, options, extra, records, reserved);
+    static volatile LONG observations = 0;
+    if (InterlockedIncrement(&observations) > 8) return status;
     const DWORD error = GetLastError();
     unsigned count = 0, fake = 0;
     if (!status && records && !(options & DNS_QUERY_RETURN_MESSAGE))
@@ -364,6 +382,73 @@ DNS_STATUS WINAPI HookDnsQueryW(PCWSTR name, WORD type, DWORD options, PVOID ext
     WriteApiObservation(line);
     SetLastError(error);
     return status;
+}
+
+// Observe missing resolver entry points without wrapping async callbacks or
+// recording host names. Results and allocation ownership remain with Windows.
+DNS_STATUS WINAPI HookDnsQueryA(PCSTR name, WORD type, DWORD options, PVOID extra,
+                               PDNS_RECORD *records, PVOID *reserved)
+{
+    const DNS_STATUS status = OriginalDnsQueryA(name, type, options, extra, records, reserved);
+    static volatile LONG observations = 0;
+    if (InterlockedIncrement(&observations) > 8) return status;
+    const DWORD error = GetLastError();
+    char line[100]{};
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "DnsQuery_A type=%u status=%ld raw_message=%d",
+        type, status, (options & DNS_QUERY_RETURN_MESSAGE) != 0);
+    WriteApiObservation(line);
+    SetLastError(error);
+    return status;
+}
+
+DNS_STATUS WINAPI HookDnsQueryEx(PDNS_QUERY_REQUEST request, PDNS_QUERY_RESULT result,
+                                PDNS_QUERY_CANCEL cancel);
+DNS_STATUS ObserveDnsQueryEx(DNS_STATUS status, WORD type, bool asynchronous)
+{
+    static volatile LONG observations = 0;
+    if (InterlockedIncrement(&observations) > 8) return status;
+    const DWORD error = GetLastError();
+    char line[100]{};
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "DnsQueryEx type=%u status=%ld async=%d",
+        type, status, asynchronous);
+    WriteApiObservation(line);
+    SetLastError(error);
+    return status;
+}
+
+INT WSAAPI HookGetAddrInfoW(PCWSTR name, PCWSTR service, const ADDRINFOW *hints, PADDRINFOW *result);
+INT ObserveWideResult(INT status, const ADDRINFOW *hints)
+{
+    static volatile LONG observations = 0;
+    if (InterlockedIncrement(&observations) > 8) return status;
+    const int error = WSAGetLastError();
+    char line[100]{};
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "GetAddrInfoW status=%d family=%d type=%d flags=%d",
+        status, hints ? hints->ai_family : 0, hints ? hints->ai_socktype : 0, hints ? hints->ai_flags : 0);
+    WriteApiObservation(line);
+    WSASetLastError(error);
+    return status;
+}
+
+hostent *WSAAPI HookGetHostByName(const char *name);
+hostent *ObserveHostResult(hostent *result)
+{
+    static volatile LONG observations = 0;
+    if (InterlockedIncrement(&observations) > 8) return result;
+    const int error = WSAGetLastError();
+    unsigned fake = 0;
+    if (result && result->h_addrtype == AF_INET && result->h_length == sizeof(IN_ADDR))
+        for (unsigned i = 0; result->h_addr_list && result->h_addr_list[i] && i < 64; ++i)
+        {
+            IN_ADDR address{};
+            memcpy(&address, result->h_addr_list[i], sizeof(address));
+            if ((ntohl(address.s_addr) & 0xfffe0000u) == 0xc6120000u) ++fake;
+        }
+    char line[100]{};
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "gethostbyname success=%d fake_a=%u", result != nullptr, fake);
+    WriteApiObservation(line);
+    WSASetLastError(error);
+    return result;
 }
 
 BOOL PASCAL HookConnectEx(SOCKET socket, const sockaddr *address, int length, PVOID sendBuffer,
@@ -915,6 +1000,177 @@ int ResolveViaPhysicalDns(const std::string &input, const PhysicalNetworkConfig 
 
 // 同步 GetAddrInfoExW 可要求两种名称：CNAME 最终名称与查询使用的完整域名。
 // 使用自有结果对象并配套释放入口，避免把自分配字符串交给 Windows 释放器。
+volatile LONG pendingDnsQueries = 0;
+struct AsyncDnsQuery
+{
+    volatile LONG references = 2; // submitting thread and possible completion
+    DNS_QUERY_REQUEST3 request{};
+    PDNS_QUERY_COMPLETION_ROUTINE completion = nullptr;
+    PVOID context = nullptr;
+    void Release() noexcept
+    {
+        if (InterlockedDecrement(&references) == 0)
+        {
+            InterlockedDecrement(&pendingDnsQueries);
+            delete this;
+        }
+    }
+};
+
+VOID WINAPI CompletePhysicalDns(PVOID context, PDNS_QUERY_RESULT result)
+{
+    auto *query = static_cast<AsyncDnsQuery *>(context);
+    // Keep the caller's result, cancellation object and callback context intact.
+    // The second reference also covers completion before DnsQueryEx returns.
+    struct CompletionRelease { AsyncDnsQuery *query; ~CompletionRelease() { query->Release(); } } release{query};
+    query->completion(query->context, result);
+}
+
+DNS_STATUS WINAPI HookDnsQueryEx(PDNS_QUERY_REQUEST request, PDNS_QUERY_RESULT result,
+                                PDNS_QUERY_CANCEL cancel)
+{
+    const DWORD incomingError = GetLastError();
+    const WORD type = request ? request->QueryType : 0;
+    const bool asynchronous = request && request->pQueryCompletionCallback;
+    DNS_QUERY_REQUEST3 copy{};
+    AsyncDnsQuery *pending = nullptr;
+    bool synchronousCopy = false;
+    try
+    {
+        bool supported = request && result &&
+            (request->Version == DNS_QUERY_REQUEST_VERSION1 || request->Version == DNS_QUERY_REQUEST_VERSION3) &&
+            request->InterfaceIndex == 0 && !request->pDnsServerList;
+        if (supported && request->Version == DNS_QUERY_REQUEST_VERSION3)
+        {
+            const auto *extended = reinterpret_cast<const DNS_QUERY_REQUEST3 *>(request);
+            supported = !extended->cCustomServers && !extended->pCustomServers &&
+                !extended->IsNetworkQueryRequired && !extended->RequiredNetworkIndex;
+        }
+        PhysicalNetworkConfig config;
+        if (supported && IsRoutingEnabled() && ReadPhysicalNetworkConfig(config))
+        {
+            memcpy(&copy, request, request->Version == DNS_QUERY_REQUEST_VERSION3 ?
+                sizeof(DNS_QUERY_REQUEST3) : sizeof(DNS_QUERY_REQUEST));
+            copy.InterfaceIndex = config.index;
+            if (!asynchronous)
+                synchronousCopy = true;
+            else
+            {
+                if (InterlockedIncrement(&pendingDnsQueries) <= 256)
+                {
+                    pending = new (std::nothrow) AsyncDnsQuery;
+                    if (pending)
+                    {
+                        pending->request = copy;
+                        pending->completion = copy.pQueryCompletionCallback;
+                        pending->context = copy.pQueryContext;
+                        pending->request.pQueryCompletionCallback = CompletePhysicalDns;
+                        pending->request.pQueryContext = pending;
+                    }
+                }
+                if (!pending) InterlockedDecrement(&pendingDnsQueries);
+            }
+        }
+    }
+    catch (...) {} // Preserve the application's original call if setup fails.
+    // Invoke Windows outside setup's exception boundary: never replay a query
+    // because an application completion callback raises an exception.
+    SetLastError(incomingError);
+    if (pending)
+    {
+        const DNS_STATUS status = OriginalDnsQueryEx(
+            reinterpret_cast<PDNS_QUERY_REQUEST>(&pending->request), result, cancel);
+        const DWORD error = GetLastError();
+        if (status != DNS_REQUEST_PENDING) pending->Release(); // Windows will not call completion.
+        pending->Release();
+        SetLastError(error);
+        return ObserveDnsQueryEx(status, type, true);
+    }
+    if (synchronousCopy)
+        return ObserveDnsQueryEx(OriginalDnsQueryEx(reinterpret_cast<PDNS_QUERY_REQUEST>(&copy), result, cancel), type, false);
+    return ObserveDnsQueryEx(OriginalDnsQueryEx(request, result, cancel), type, asynchronous);
+}
+
+INT WSAAPI HookGetAddrInfoW(PCWSTR name, PCWSTR service, const ADDRINFOW *hints, PADDRINFOW *result)
+{
+    try
+    {
+        const ADDRINFOW defaults{};
+        const auto *effective = hints ? hints : &defaults;
+        const int supportedFlags = AI_ADDRCONFIG | AI_V4MAPPED | AI_NUMERICSERV;
+        if (!name || !result || !IsRoutingEnabled() ||
+            (effective->ai_family != AF_INET && effective->ai_family != AF_UNSPEC) ||
+            (effective->ai_socktype != 0 && effective->ai_socktype != SOCK_STREAM) ||
+            (effective->ai_protocol != 0 && effective->ai_protocol != IPPROTO_TCP) ||
+            (effective->ai_flags & ~supportedFlags) || effective->ai_addrlen ||
+            effective->ai_canonname || effective->ai_addr || effective->ai_next)
+            return ObserveWideResult(OriginalGetAddrInfoW(name, service, hints, result), hints);
+        bool domain = wcschr(name, L'.') != nullptr && _wcsicmp(name, L"localhost.") != 0;
+        std::string ascii;
+        for (const wchar_t *ch = name; *ch; ++ch)
+        {
+            if (*ch > 127) { domain = false; break; }
+            ascii.push_back(static_cast<char>(*ch));
+        }
+        IN_ADDR address{};
+        if (!domain || InetPtonW(AF_INET, name, &address) == 1)
+            return ObserveWideResult(OriginalGetAddrInfoW(name, service, hints, result), hints);
+        *result = nullptr;
+        PhysicalNetworkConfig config;
+        if (!ReadPhysicalNetworkConfig(config)) return EAI_FAIL;
+        const int error = ResolveViaPhysicalDns(ascii, config, address);
+        if (error) return error;
+        wchar_t numeric[INET_ADDRSTRLEN]{};
+        if (!InetNtopW(AF_INET, &address, numeric, INET_ADDRSTRLEN)) return EAI_FAIL;
+        auto numericHints = *effective;
+        numericHints.ai_family = AF_INET;
+        numericHints.ai_flags |= AI_NUMERICHOST;
+        return ObserveWideResult(OriginalGetAddrInfoW(numeric, service, &numericHints, result), hints);
+    }
+    catch (...) { if (result) *result = nullptr; return EAI_MEMORY; }
+}
+
+hostent *WSAAPI HookGetHostByName(const char *name)
+{
+    try
+    {
+        if (!name || !IsRoutingEnabled()) return ObserveHostResult(OriginalGetHostByName(name));
+        bool domain = strchr(name, '.') != nullptr && _stricmp(name, "localhost.") != 0;
+        for (const unsigned char *ch = reinterpret_cast<const unsigned char *>(name); *ch; ++ch)
+            if (*ch > 127) { domain = false; break; }
+        IN_ADDR numeric{};
+        if (!domain || InetPtonA(AF_INET, name, &numeric) == 1)
+            return ObserveHostResult(OriginalGetHostByName(name));
+        PhysicalNetworkConfig config;
+        if (!ReadPhysicalNetworkConfig(config)) { WSASetLastError(WSANO_RECOVERY); return nullptr; }
+        IN_ADDR address{};
+        std::string canonical;
+        const int error = ResolveViaPhysicalDns(name, config, address, &canonical);
+        if (error) { WSASetLastError(error); return nullptr; }
+        // gethostbyname exposes thread-local storage, never caller-owned memory.
+        // Each later call on this thread may replace it; no free API is needed.
+        struct HostResult
+        {
+            hostent entry{};
+            std::string canonical;
+            IN_ADDR address{};
+            char *aliases[1]{};
+            char *addresses[2]{};
+        };
+        thread_local HostResult result;
+        result.canonical = canonical.empty() ? name : canonical;
+        result.address = address;
+        result.addresses[0] = reinterpret_cast<char *>(&result.address);
+        result.entry.h_name = result.canonical.data();
+        result.entry.h_aliases = result.aliases;
+        result.entry.h_addrtype = AF_INET;
+        result.entry.h_length = sizeof(IN_ADDR);
+        result.entry.h_addr_list = result.addresses;
+        return ObserveHostResult(&result.entry);
+    }
+    catch (...) { WSASetLastError(WSA_NOT_ENOUGH_MEMORY); return nullptr; }
+}
+
 struct OwnedExtendedAddress
 {
     ADDRINFOEX2W info{};
@@ -960,6 +1216,8 @@ INT WSAAPI HookGetAddrInfoExW(PCWSTR name, PCWSTR service, DWORD nameSpace, LPGU
                     hints ? hints->ai_flags : -1, overlapped != nullptr, completion != nullptr);
         WriteTestReceipt(receipt);
         const int supportedFlags = AI_CANONNAME | AI_FQDN | AI_ADDRCONFIG | AI_NUMERICHOST;
+        static volatile LONG observations = 0;
+        if (InterlockedIncrement(&observations) <= 8) WriteApiObservation(receipt);
         if (!IsRoutingEnabled() || !name || !hints || !result || provider || timeout ||
             overlapped || completion || (nameSpace != NS_DNS && nameSpace != NS_ALL) ||
             (hints->ai_family != AF_INET && hints->ai_family != AF_UNSPEC) ||
@@ -1854,6 +2112,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
             return FALSE;
         }
         if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
+            !AttachWinInetRouting(IsRoutingEnabled) ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalGetAddrInfo), HookGetAddrInfo) !=
                 NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalConnect), HookConnect) != NO_ERROR ||
@@ -1876,6 +2135,10 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
                 NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalGetIEProxyConfig), HookGetIEProxyConfig) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalDnsQueryW), HookDnsQueryW) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalDnsQueryA), HookDnsQueryA) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalDnsQueryEx), HookDnsQueryEx) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalGetAddrInfoW), HookGetAddrInfoW) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalGetHostByName), HookGetHostByName) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalWinHttpConnect), HookWinHttpConnect) !=
                 NO_ERROR)
         {
@@ -1885,6 +2148,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
         const bool installed = DetourTransactionCommit() == NO_ERROR;
         if (installed)
         {
+            RegisterInstalledMember();
             WriteTestReceipt("dll_hooks_installed");
         }
         return installed;
@@ -1897,6 +2161,6 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
 // D:\ZdC\artifacts\socket-proof。
 // 本命令编译当前文件；另外两个源文件的末尾也有各自的编译命令。
 // clang-format off
-// cl /nologo /std:c++17 /utf-8 /EHsc /W4 /MT /I ..\..\third_party\Detours\include /LD ..\..\SocketHook.cpp ..\..\third_party\Detours\lib.X64\detours.lib /Fe:ZdC.SocketHook.dll /Fo:Hook.obj
+// cl /nologo /std:c++17 /utf-8 /EHsc /W4 /MT /I ..\..\third_party\Detours\include /LD ..\..\SocketHook.cpp ..\..\WinInetRouting.cpp ..\..\third_party\Detours\lib.X64\detours.lib /Fe:ZdC.SocketHook.dll /Fo:Hook.obj
 // clang-format on
 // 三个文件编译完成后运行 .\ZdC.SocketController.exe，自动完成两轮并退出。
