@@ -314,15 +314,16 @@ static int RunApplication(const std::wstring &path, int argc, wchar_t **argv,
     if (workingLength && (GetFileAttributesW(workingDirectory) == INVALID_FILE_ATTRIBUTES ||
         !(GetFileAttributesW(workingDirectory) & FILE_ATTRIBUTE_DIRECTORY))) return 6;
     wchar_t showText[8]{};
-    GetEnvironmentVariableW(L"ZDC_WINDOW_STYLE", showText, 8);
-    const int show = _wtoi(showText);
+    const DWORD showLength = GetEnvironmentVariableW(L"ZDC_WINDOW_STYLE", showText, 8);
+    const int show = showLength == 1 && (showText[0] == L'0' || showText[0] == L'1' ||
+        showText[0] == L'3' || showText[0] == L'7') ? showText[0] - L'0' : 1;
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = static_cast<WORD>(show == 3 || show == 7 ? show : 1);
+    startup.wShowWindow = static_cast<WORD>(show == 0 || show == 3 || show == 7 ? show : 1);
     PROCESS_INFORMATION child{};
     if (!DetourCreateProcessWithDllExW(path.c_str(), command.data(), nullptr, nullptr, FALSE,
-                                       DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, nullptr,
+                                       (show == 0 ? CREATE_NO_WINDOW : DETACHED_PROCESS) | CREATE_NEW_PROCESS_GROUP, nullptr,
                                        workingLength ? workingDirectory : nullptr, &startup, &child, dll.c_str(), nullptr))
     {
         printf("APPLICATION_START_ERROR %lu\n", GetLastError());
