@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+  <ItemGroup><EmbeddedResource Include="Upstream\Localization\en.json" LogicalName="upstream.en.json" /></ItemGroup>
+</Project>
