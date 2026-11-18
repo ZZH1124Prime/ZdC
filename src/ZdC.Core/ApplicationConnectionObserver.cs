@@ -27,6 +27,13 @@ internal sealed class ApplicationConnectionObserver : IDisposable
 
     public bool OwnsProcess(int pid) => _members.TryGetValue(pid, out var identity) && identity.IsAlive == true;
 
+    internal IReadOnlyList<(int Pid, long Created)> LiveMemberIdentities()
+    {
+        _lastMembershipSample = 0;
+        HasLiveMembers(true);
+        return _members.Where(x => x.Value.IsAlive == true).Select(x => (x.Key, x.Value.Created)).ToArray();
+    }
+
     public void Invalidate() { _established.Clear(); _lastSample = 0; _count = 0; _available = false; _observedAt = null; }
 
     public void SetRoot(int pid)

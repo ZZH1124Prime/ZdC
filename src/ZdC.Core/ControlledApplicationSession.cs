@@ -60,6 +60,13 @@ public sealed class ControlledApplicationSession : IAsyncDisposable
         _absenceSince = 0; _lastAbsenceSample = 0; _absenceSamples = 0;
     }
 
+    internal IReadOnlyList<(int Pid, long Created)> LiveMemberIdentities()
+    {
+        _lastLeaseSample = 0;
+        SyncLeaseMembers();
+        return _connections.LiveMemberIdentities();
+    }
+
     internal ApplicationSessionState GetConnectionState(bool children)
     {
         SyncLeaseMembers();

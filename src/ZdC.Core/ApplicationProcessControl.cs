@@ -48,7 +48,28 @@ internal static class ApplicationProcessControl
         return result.OrderBy(x => x.ProcessId).ToArray();
     }
 
-    internal static IReadOnlyList<int> Stop(string application, IReadOnlyList<ApplicationBlockingProcess> confirmed, Action<int>? onStopped)
+    internal static IReadOnlyList<ApplicationBlockingProcess> ListKnown(IEnumerable<(int Pid, long Created)> members)
+    {
+        var result = new List<ApplicationBlockingProcess>();
+        using var own = Process.GetCurrentProcess();
+        foreach (var (pid, created) in members)
+        {
+            if (!ProcessIdToSessionId(pid, out var session) || session != own.SessionId) continue;
+            using var handle = OpenProcess(Query | Synchronize, false, pid);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error == 87 || (error == 5 && HasExited(pid))) continue;
+                throw new Win32Exception(error);
+            }
+            var item = Read(handle, pid);
+            if (item is not null && item.CreatedFileTimeUtc == created && SameUser(handle)) result.Add(item);
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<int> Stop(string application, IReadOnlyList<ApplicationBlockingProcess> confirmed,
+        IReadOnlyList<ApplicationBlockingProcess> known, Action<int>? onStopped)
     {
         var images = BlockingImages(application);
         using var own = Process.GetCurrentProcess();
@@ -56,13 +77,15 @@ internal static class ApplicationProcessControl
         var stopped = new List<int>();
         foreach (var item in confirmed.DistinctBy(x => x.ProcessId))
         {
-            if (!images.Contains(item.ExecutablePath, StringComparer.OrdinalIgnoreCase)) continue;
+            if (!images.Contains(item.ExecutablePath, StringComparer.OrdinalIgnoreCase) &&
+                !known.Any(x => x.ProcessId == item.ProcessId && x.CreatedFileTimeUtc == item.CreatedFileTimeUtc &&
+                    x.ExecutablePath.Equals(item.ExecutablePath, StringComparison.OrdinalIgnoreCase))) continue;
             if (!ProcessIdToSessionId(item.ProcessId, out var session) || session != ownSession) continue;
             using var handle = OpenProcess(Query | Synchronize | Terminate, false, item.ProcessId);
             if (handle.IsInvalid)
             {
                 var error = Marshal.GetLastWin32Error();
-                if (error == 87) continue;
+                if (error == 87 || (error == 5 && HasExited(item.ProcessId))) continue;
                 throw new Win32Exception(error);
             }
             var current = Read(handle, item.ProcessId);
@@ -71,9 +94,12 @@ internal static class ApplicationProcessControl
             if (!TerminateProcess(handle, 1))
             {
                 var error = Marshal.GetLastWin32Error();
-                if (WaitForSingleObject(handle, 0) == 0) continue;
+                if (WaitForSingleObject(handle, error == 5 ? 150u : 0u) == 0) continue;
                 throw new Win32Exception(error);
             }
+            var wait = WaitForSingleObject(handle, 3000);
+            if (wait == 0x102) throw new TimeoutException();
+            if (wait != 0) throw new Win32Exception(Marshal.GetLastWin32Error());
             stopped.Add(item.ProcessId);
             onStopped?.Invoke(item.ProcessId);
         }
@@ -103,6 +129,23 @@ internal static class ApplicationProcessControl
         using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
         using (var own = WindowsIdentity.GetCurrent())
             return identity.User is not null && identity.User == own.User;
+    }
+
+    private static bool HasExited(int pid)
+    {
+        // Ending a parent may make a confirmed child exit before its turn.
+        // Windows can briefly deny TERMINATE while that exit is in progress.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var handle = OpenProcess(Query | Synchronize, false, pid);
+            if (handle.IsInvalid)
+            {
+                if (Marshal.GetLastWin32Error() == 87) return true;
+                Thread.Sleep(50);
+            }
+            else if (WaitForSingleObject(handle, 50) == 0) return true;
+        }
+        return false;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);

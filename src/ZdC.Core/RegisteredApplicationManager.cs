@@ -266,7 +266,13 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
             EnsureReady();
             if (!(await _registry.ListAsync(token).ConfigureAwait(false)).Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException();
-            return await Task.Run(() => ApplicationProcessControl.List(path), token).ConfigureAwait(false);
+            return await Task.Run<IReadOnlyList<ApplicationBlockingProcess>>(() =>
+            {
+                var known = _sessions.TryGetValue(path, out var session)
+                    ? ApplicationProcessControl.ListKnown(session.LiveMemberIdentities()) : [];
+                return ApplicationProcessControl.List(path).Concat(known).DistinctBy(x => (x.ProcessId, x.CreatedFileTimeUtc))
+                    .OrderBy(x => x.ProcessId).ToArray();
+            }, token).ConfigureAwait(false);
         }
         finally { operation.Dispose(); }
     }
@@ -283,8 +289,13 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
             EnsureReady();
             if (!(await _registry.ListAsync(token).ConfigureAwait(false)).Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException();
-            return await Task.Run(() => ApplicationProcessControl.Stop(path, frozen,
-                pid => _log?.Write($"confirmed process stop pid={pid}")), token).ConfigureAwait(false);
+            return await Task.Run(() =>
+            {
+                var known = _sessions.TryGetValue(path, out var session)
+                    ? ApplicationProcessControl.ListKnown(session.LiveMemberIdentities()) : [];
+                return ApplicationProcessControl.Stop(path, frozen, known,
+                    pid => _log?.Write($"confirmed process exited pid={pid}"));
+            }, token).ConfigureAwait(false);
         }
         finally { operation.Dispose(); }
     }
