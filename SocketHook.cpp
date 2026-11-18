@@ -50,6 +50,9 @@ namespace
 auto OriginalGetAddrInfo = &getaddrinfo;
 auto OriginalConnect = &connect;
 auto OriginalSend = &send;
+auto OriginalSendTo = &sendto;
+auto OriginalWSASendTo = &WSASendTo;
+auto OriginalWSASendMsg = &WSASendMsg;
 auto OriginalRecv = &recv;
 auto OriginalWSASend = &WSASend;
 auto OriginalWSARecv = &WSARecv;
@@ -453,6 +456,10 @@ hostent *ObserveHostResult(hostent *result)
 
 BOOL PASCAL HookConnectEx(SOCKET socket, const sockaddr *address, int length, PVOID sendBuffer,
                           DWORD sendLength, LPDWORD bytesSent, LPOVERLAPPED overlapped);
+INT WSAAPI HookWSASendMsg(SOCKET socket, LPWSAMSG message, DWORD flags, LPDWORD bytes,
+                         LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion);
+INT WSAAPI HookExtensionWSASendMsg(SOCKET socket, LPWSAMSG message, DWORD flags, LPDWORD bytes,
+                         LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion);
 int WSAAPI HookWSAIoctl(SOCKET socket, DWORD code, LPVOID input, DWORD inputSize, LPVOID output,
                         DWORD outputSize, LPDWORD bytes, LPWSAOVERLAPPED overlapped,
                         LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
@@ -461,6 +468,7 @@ int WSAAPI HookWSAIoctl(SOCKET socket, DWORD code, LPVOID input, DWORD inputSize
                                         overlapped, completion);
     const int error = WSAGetLastError();
     const GUID connectEx = WSAID_CONNECTEX;
+    const GUID sendMsg = WSAID_WSASENDMSG;
     if (result == 0 && !overlapped && !completion && code == SIO_GET_EXTENSION_FUNCTION_POINTER &&
         input && inputSize == sizeof(GUID) && memcmp(input, &connectEx, sizeof(GUID)) == 0 &&
         output && outputSize >= sizeof(LPFN_CONNECTEX) && bytes && *bytes == sizeof(LPFN_CONNECTEX))
@@ -468,6 +476,10 @@ int WSAAPI HookWSAIoctl(SOCKET socket, DWORD code, LPVOID input, DWORD inputSize
         *static_cast<LPFN_CONNECTEX *>(output) = HookConnectEx;
         WriteTestReceipt("ConnectEx pointer_wrapped");
     }
+    else if (result == 0 && !overlapped && !completion && code == SIO_GET_EXTENSION_FUNCTION_POINTER &&
+        input && inputSize == sizeof(GUID) && memcmp(input, &sendMsg, sizeof(GUID)) == 0 &&
+        output && outputSize >= sizeof(LPFN_WSASENDMSG) && bytes && *bytes == sizeof(LPFN_WSASENDMSG))
+        *static_cast<LPFN_WSASENDMSG *>(output) = HookExtensionWSASendMsg;
     WSASetLastError(error);
     return result;
 }
@@ -631,6 +643,148 @@ bool ReadPhysicalNetworkConfig(PhysicalNetworkConfig &networkConfig)
 
 // IP_UNICAST_IF 的 IPv4 接口编号使用网络字节序。套接字已经绑定时保留原端口，
 // 仅接受与配置一致的源地址；失败直接返回错误，不悄悄改走默认代理路径。
+struct DatagramPacketInfo
+{
+    alignas(WSACMSGHDR) char control[WSA_CMSG_SPACE(sizeof(IN_PKTINFO))]{};
+};
+
+bool PrepareSynchronousDatagram(SOCKET socket, const sockaddr *destination, int length,
+                               DWORD flags, WSAMSG &message, DatagramPacketInfo &packet) noexcept
+{
+    const int originalError = WSAGetLastError();
+    bool prepared = false;
+    try
+    {
+        int type = 0, typeLength = sizeof(type);
+        // Stream sockets ignore WSASendTo's destination; inspect type first.
+        if (IsRoutingEnabled() && getsockopt(socket, SOL_SOCKET, SO_TYPE,
+            reinterpret_cast<char *>(&type), &typeLength) == 0 && type == SOCK_DGRAM &&
+            destination && length >= static_cast<int>(sizeof(sockaddr_in)) &&
+            destination->sa_family == AF_INET && !(flags & ~(MSG_DONTROUTE | MSG_PARTIAL | MSG_OOB)))
+        {
+            const DWORD host = ntohl(reinterpret_cast<const sockaddr_in *>(destination)->sin_addr.s_addr);
+            DWORD chosenInterface = 0;
+            int optionLength = sizeof(chosenInterface), broadcast = 0, broadcastLength = sizeof(broadcast);
+            sockaddr_in local{};
+            sockaddr_storage peer{};
+            int peerLength = sizeof(peer);
+            const bool unconnected = getpeername(socket, reinterpret_cast<sockaddr *>(&peer), &peerLength) == SOCKET_ERROR &&
+                WSAGetLastError() == WSAENOTCONN;
+            int localLength = sizeof(local);
+            const int localStatus = getsockname(socket, reinterpret_cast<sockaddr *>(&local), &localLength);
+            const bool wildcard = (localStatus == SOCKET_ERROR && WSAGetLastError() == WSAEINVAL) ||
+                (localStatus == 0 && local.sin_family == AF_INET && local.sin_addr.s_addr == INADDR_ANY);
+            PhysicalNetworkConfig config;
+            if ((host >> 24) != 0 && (host >> 24) != 127 && (host >> 28) < 14 &&
+                (host & 0xfffe0000u) != 0xc6120000u && wildcard && unconnected &&
+                getsockopt(socket, IPPROTO_IP, IP_UNICAST_IF, reinterpret_cast<char *>(&chosenInterface), &optionLength) == 0 && !chosenInterface &&
+                getsockopt(socket, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<char *>(&broadcast), &broadcastLength) == 0 && !broadcast &&
+                ReadPhysicalNetworkConfig(config))
+            {
+                message.Control.buf = packet.control;
+                message.Control.len = sizeof(packet.control);
+                auto *header = WSA_CMSG_FIRSTHDR(&message);
+                header->cmsg_level = IPPROTO_IP;
+                header->cmsg_type = IP_PKTINFO;
+                header->cmsg_len = WSA_CMSG_LEN(sizeof(IN_PKTINFO));
+                auto *info = reinterpret_cast<IN_PKTINFO *>(WSA_CMSG_DATA(header));
+                info->ipi_addr = config.source;
+                info->ipi_ifindex = config.index; // IN_PKTINFO takes a host-order index.
+                prepared = true;
+            }
+        }
+    }
+    catch (...) {}
+    WSASetLastError(originalError);
+    return prepared;
+}
+
+LPFN_WSASENDMSG GetProviderSendMessage(SOCKET socket)
+{
+    // Obtain the extension for this socket's provider; never cache a global
+    // provider pointer or change socket-wide routing/binding options.
+    const GUID id = WSAID_WSASENDMSG;
+    LPFN_WSASENDMSG sendMessage = nullptr;
+    DWORD returned = 0;
+    if (OriginalWSAIoctl(socket, SIO_GET_EXTENSION_FUNCTION_POINTER,
+        const_cast<GUID *>(&id), sizeof(id), &sendMessage, sizeof(sendMessage),
+        &returned, nullptr, nullptr) == SOCKET_ERROR) return nullptr;
+    if (returned != sizeof(sendMessage) || !sendMessage)
+    { WSASetLastError(WSAEOPNOTSUPP); return nullptr; }
+    return sendMessage;
+}
+
+int SendSynchronousDatagram(SOCKET socket, WSAMSG &message, DWORD flags, LPDWORD bytes)
+{
+    const auto sendMessage = GetProviderSendMessage(socket);
+    return sendMessage ? sendMessage(socket, &message, flags, bytes, nullptr, nullptr) : SOCKET_ERROR;
+}
+
+int WSAAPI HookSendTo(SOCKET socket, const char *buffer, int length, int flags,
+                     const sockaddr *destination, int destinationLength)
+{
+    WSABUF data{length >= 0 ? static_cast<ULONG>(length) : 0, const_cast<char *>(buffer)};
+    WSAMSG message{};
+    message.name = const_cast<sockaddr *>(destination);
+    message.namelen = destinationLength;
+    message.lpBuffers = &data;
+    message.dwBufferCount = 1;
+    DatagramPacketInfo packet;
+    if (length >= 0 && PrepareSynchronousDatagram(socket, destination, destinationLength, flags, message, packet))
+    {
+        DWORD bytes = 0;
+        const int result = SendSynchronousDatagram(socket, message, flags, &bytes);
+        return result == 0 ? static_cast<int>(bytes) : SOCKET_ERROR;
+    }
+    return OriginalSendTo(socket, buffer, length, flags, destination, destinationLength);
+}
+
+int WSAAPI HookWSASendTo(SOCKET socket, LPWSABUF buffers, DWORD count, LPDWORD bytes, DWORD flags,
+                        const sockaddr *destination, int length, LPWSAOVERLAPPED overlapped,
+                        LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    WSAMSG message{};
+    message.name = const_cast<sockaddr *>(destination);
+    message.namelen = length;
+    message.lpBuffers = buffers;
+    message.dwBufferCount = count;
+    DatagramPacketInfo packet;
+    if (!overlapped && !completion && PrepareSynchronousDatagram(socket, destination, length, flags, message, packet))
+        return SendSynchronousDatagram(socket, message, flags, bytes);
+    return OriginalWSASendTo(socket, buffers, count, bytes, flags, destination, length, overlapped, completion);
+}
+
+INT DispatchSendMessage(LPFN_WSASENDMSG original, SOCKET socket, LPWSAMSG message, DWORD flags, LPDWORD bytes,
+                       LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    // Pending I/O keeps the application's original buffers/callback/IOCP path.
+    // Only synchronous calls may borrow our stack-based ancillary storage.
+    if (message && !overlapped && !completion && !message->Control.buf && !message->Control.len)
+    {
+        auto copy = *message;
+        DatagramPacketInfo packet;
+        if (PrepareSynchronousDatagram(socket, copy.name, copy.namelen, flags, copy, packet))
+            return original(socket, &copy, flags, bytes, nullptr, nullptr);
+    }
+    return original(socket, message, flags, bytes, overlapped, completion);
+}
+
+INT WSAAPI HookWSASendMsg(SOCKET socket, LPWSAMSG message, DWORD flags, LPDWORD bytes,
+                         LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    return DispatchSendMessage(OriginalWSASendMsg, socket, message, flags, bytes, overlapped, completion);
+}
+
+INT WSAAPI HookExtensionWSASendMsg(SOCKET socket, LPWSAMSG message, DWORD flags, LPDWORD bytes,
+                         LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion)
+{
+    const int error = WSAGetLastError();
+    const auto original = GetProviderSendMessage(socket);
+    if (!original) return SOCKET_ERROR;
+    WSASetLastError(error);
+    return DispatchSendMessage(original, socket, message, flags, bytes, overlapped, completion);
+}
+
 bool BindSocketToPhysicalAdapter(SOCKET socket, const PhysicalNetworkConfig &networkConfig)
 {
     sockaddr_in current{};
@@ -2117,6 +2271,9 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID)
                 NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalConnect), HookConnect) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalSend), HookSend) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalSendTo), HookSendTo) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalWSASendTo), HookWSASendTo) != NO_ERROR ||
+            DetourAttach(reinterpret_cast<PVOID *>(&OriginalWSASendMsg), HookWSASendMsg) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalRecv), HookRecv) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalWSASend), HookWSASend) != NO_ERROR ||
             DetourAttach(reinterpret_cast<PVOID *>(&OriginalWSARecv), HookWSARecv) != NO_ERROR ||
