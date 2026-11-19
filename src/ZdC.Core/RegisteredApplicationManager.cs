@@ -67,8 +67,11 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
                 var restored = await Task.Run(() => ControlledApplicationSession.TryRestore(entry.Path, _controllerPath, _log), token).ConfigureAwait(false);
                 if (restored is not null) _sessions[entry.Path] = restored;
             }
+            foreach (var entry in entries)
+                if (!_sessions.ContainsKey(entry.Path) && entry.ShortcutPath is not null)
+                    await _registry.RefreshShortcutAsync(entry.Path, token).ConfigureAwait(false);
             _loaded = true;
-            return entries;
+            return await _registry.ListAsync(token).ConfigureAwait(false);
         }
         finally { lock (_admission) _maintenance = false; _operations.Release(); }
     }
@@ -152,11 +155,24 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
     public async Task<ApplicationLaunchResult> LaunchAsync(string registeredPath, IEnumerable<string>? arguments = null,
         CancellationToken token = default, bool routingEnabled = true)
     {
-        var operation = await EnterAsync(Path.GetFullPath(registeredPath), token).ConfigureAwait(false);
+        var old = Path.GetFullPath(registeredPath);
+        string path;
+        using (await EnterAsync(old, token).ConfigureAwait(false))
+        {
+            if (_sessions.TryGetValue(old, out var existing))
+            {
+                if (existing.IsRunning && existing.HasLiveApplicationProcesses(true) != false)
+                    throw new InvalidOperationException("该注册项已有接管会话，请使用启用或停用操作。");
+                await StopCoreAsync(old).ConfigureAwait(false);
+            }
+            path = (await _registry.RefreshShortcutAsync(old, token).ConfigureAwait(false)).Path;
+        }
+
+        // Lock the resolved identity before starting. Other cards may already be using that path.
+        var operation = await EnterAsync(path, token).ConfigureAwait(false);
         try
         {
             EnsureReady();
-            var path = Path.GetFullPath(registeredPath);
             var entry = (await _registry.ListAsync(token).ConfigureAwait(false))
                 .SingleOrDefault(x => string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException("请先注册该应用，再从工具启动。");
@@ -164,7 +180,7 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
                 originalSession.HasLiveApplicationProcesses(true) != false)
                 throw new InvalidOperationException("该注册项已有接管会话，请使用启用或停用操作。");
             if (!File.Exists(entry.Path))
-                throw new FileNotFoundException("应用入口已失效，请拖入新的快捷方式替换。", entry.Path);
+                throw new FileNotFoundException("入口已失效，请拖入新入口替换。", entry.Path);
             if (entry.WorkingDirectory is not null && !Directory.Exists(entry.WorkingDirectory))
                 throw new DirectoryNotFoundException("入口起始位置已失效，请拖入新的快捷方式替换。");
             if (HasApplicationProcesses(path))

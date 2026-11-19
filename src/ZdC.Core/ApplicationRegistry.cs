@@ -10,6 +10,7 @@ public sealed record RegisteredApplication(string Name, string Path,
     string? ProductName = null, string? CompanyName = null)
 {
     public string? ShortcutPath { get; init; }
+    public string? ShortcutPublisher { get; init; }
     public string[] Arguments { get; init; } = [];
     public string? WorkingDirectory { get; init; }
     public string? IconPath { get; init; }
@@ -108,6 +109,8 @@ public sealed class ApplicationRegistry
             RequireLoaded();
             var normalized = Validate([entry]).Single();
             if (!File.Exists(normalized.Path)) throw new FileNotFoundException("应用入口已失效，请拖入新的入口。", normalized.Path);
+            if (normalized.ShortcutPath is not null)
+                normalized = normalized with { ShortcutPublisher = ShortcutRecovery.Publisher.Read(normalized.Path) ?? "" };
             await VerifyUnchangedAsync(ct).ConfigureAwait(false);
             var index = replacePath is null ? -1 : Array.FindIndex(_entries, e => SamePath(e.Path, replacePath));
             if (replacePath is not null && index < 0) throw new KeyNotFoundException("要替换的入口已移除。");
@@ -128,6 +131,24 @@ public sealed class ApplicationRegistry
             await SaveAsync(candidate, ct).ConfigureAwait(false);
             return Clone(normalized);
         }, cancellationToken);
+
+    internal Task<RegisteredApplication> RefreshShortcutAsync(string path, CancellationToken token,
+        IEnumerable<string>? searchDirectories = null) => RunAsync(async ct =>
+    {
+        RequireLoaded();
+        var index = Array.FindIndex(_entries, e => SamePath(e.Path, path));
+        if (index < 0) throw new InvalidOperationException("请先注册该应用，再从工具启动。");
+        var original = _entries[index];
+        var resolved = await ShortcutRecovery.ResolveAsync(original, ct, searchDirectories).ConfigureAwait(false);
+        // Record equality compares argument arrays by reference. Compare their contents before deciding to write.
+        if (ReferenceEquals(original, resolved) || (original.Arguments.SequenceEqual(resolved.Arguments) &&
+            original == (resolved with { Arguments = original.Arguments }))) return Clone(original);
+        if (_entries.Where((_, i) => i != index).Any(e => SamePath(e.Path, resolved.Path))) return Clone(original);
+        var entries = (RegisteredApplication[])_entries.Clone();
+        entries[index] = resolved;
+        await SaveAsync(entries, ct).ConfigureAwait(false);
+        return Clone(resolved);
+    }, token);
 
     public static string NormalizeExecutablePath(string path)
     {

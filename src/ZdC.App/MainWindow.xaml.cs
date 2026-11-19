@@ -121,14 +121,7 @@ public partial class MainWindow : Window
         var rows = new List<ApplicationRow>();
         foreach (var entry in _entries)
         {
-            // 图标只读取一次，状态刷新不重复访问 Shell。
-            var iconKey = $"{entry.IconPath}|{entry.IconIndex}|{entry.Path}";
-            if (!_icons.TryGetValue(iconKey, out var icon))
-            {
-                icon = await Task.Run(() => ApplicationIcon.Read(entry));
-                _icons[iconKey] = icon;
-            }
-            rows.Add(new ApplicationRow(entry, icon));
+            rows.Add(new ApplicationRow(entry, await GetIconAsync(entry)));
         }
         for (var index = 0; index < rows.Count - 1; index++) rows[index].SeparatorVisibility = Visibility.Visible;
         AppList.ItemsSource = rows;
@@ -137,6 +130,15 @@ public partial class MainWindow : Window
         EmptyState.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         await RefreshStatesAsync(force: true);
         UpdateSelection();
+    }
+
+    private async Task<ImageSource?> GetIconAsync(RegisteredApplication entry)
+    {
+        var key = $"{entry.IconPath}|{entry.IconIndex}|{entry.Path}";
+        if (_icons.TryGetValue(key, out var icon)) return icon;
+        icon = await Task.Run(() => ApplicationIcon.Read(entry));
+        _icons[key] = icon;
+        return icon;
     }
 
     private async Task RefreshStatesAsync(bool force = false)
@@ -251,6 +253,9 @@ public partial class MainWindow : Window
         row.BeginOperation();
         SetBusy(_busy);
         var operationFailed = false;
+        var attemptedLaunch = false;
+        string? launchedPath = null;
+        var operationPath = row.Path;
         try
         {
             var state = await _applications.GetSessionStateAsync(row.Path);
@@ -265,10 +270,11 @@ public partial class MainWindow : Window
                 row.SetTelemetry(state);
                 return;
             }
-            if (!File.Exists(row.Path)) { operationFailed = true; throw new InvalidOperationException("入口已失效，请拖入新入口替换。"); }
+            attemptedLaunch = true;
             operationFailed = true;
-            await _applications.LaunchAsync(row.Path, routingEnabled: true);
+            launchedPath = (await _applications.LaunchAsync(row.Path, routingEnabled: true)).RegisteredPath;
             operationFailed = false;
+            if (!string.Equals(launchedPath, row.Path, StringComparison.OrdinalIgnoreCase)) return;
             row.EndOperation();
             state = await _applications.GetSessionStateAsync(row.Path);
             row.SetState(true, state.IsRunning, state.RoutingEnabled);
@@ -281,9 +287,31 @@ public partial class MainWindow : Window
         }
         finally
         {
-            row.EndOperation();
-            _applicationOperations.Remove(row.Path);
-            SetBusy(_busy);
+            try
+            {
+                if (attemptedLaunch && !string.Equals(launchedPath, operationPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Automatic replacement persists in the same slot, including when the next launch is blocked.
+                    // Keep the other rows and their in-flight operations intact.
+                    var current = await _applications.ListAsync();
+                    var index = Array.FindIndex(_entries, e => string.Equals(e.Path, operationPath, StringComparison.OrdinalIgnoreCase));
+                    if (index >= 0 && current.Count == _entries.Length &&
+                        !string.Equals(current[index].Path, operationPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var updated = current[index];
+                        var icon = await GetIconAsync(updated);
+                        _entries[index] = updated;
+                        row.UpdateEntry(updated, icon);
+                    }
+                }
+            }
+            catch (Exception ex) { StatusText.Text = $"状态读取失败：{ex.Message}"; }
+            finally
+            {
+                row.EndOperation();
+                _applicationOperations.Remove(operationPath);
+                SetBusy(_busy);
+            }
             await RefreshStatesAsync(force: true);
         }
     }
@@ -443,12 +471,21 @@ public partial class MainWindow : Window
 
 public sealed class ApplicationRow(RegisteredApplication entry, ImageSource? icon) : INotifyPropertyChanged
 {
-    public RegisteredApplication Entry { get; } = entry;
+    public RegisteredApplication Entry { get; private set; } = entry;
     public Visibility SeparatorVisibility { get; set; } = Visibility.Collapsed;
     public string Name => Entry.Name;
     public string Path => Entry.Path;
     public string ActionHint { get; private set; } = "启动应用";
-    public ImageSource? Icon { get; } = icon;
+    public ImageSource? Icon { get; private set; } = icon;
+    public void UpdateEntry(RegisteredApplication updated, ImageSource? updatedIcon)
+    {
+        Entry = updated;
+        Icon = updatedIcon;
+        PropertyChanged?.Invoke(this, new(nameof(Entry)));
+        PropertyChanged?.Invoke(this, new(nameof(Name)));
+        PropertyChanged?.Invoke(this, new(nameof(Path)));
+        PropertyChanged?.Invoke(this, new(nameof(Icon)));
+    }
     public bool IsIconHovered { get; private set; }
     public void SetIconHover(bool value)
     {
