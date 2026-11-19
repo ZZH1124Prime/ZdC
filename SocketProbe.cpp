@@ -8,6 +8,8 @@
 #include <windows.h>  // 进程、命名事件、等待和环境变量。
 #include <ws2tcpip.h> // 域名解析、IPv4 地址转换和接口选项。
 #include <iphlpapi.h>
+#include <windns.h>
+#pragma comment(lib, "dnsapi.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #include <mswsock.h> // ConnectEx 扩展函数。
 #include <string>
@@ -187,6 +189,11 @@ static bool RunUdpProbe(const char *label)
            ExpectedSourceMatches(label, source, "208.67.222.222");
 }
 
+static void WINAPI CompleteProbeDns(void *context, DNS_QUERY_RESULT *)
+{
+    SetEvent(static_cast<HANDLE>(context));
+}
+
 static bool RunHttpProbe(const char *label, PADDRINFOEXW *deferredDnsResult = nullptr)
 {
     addrinfo hints{};
@@ -228,6 +235,50 @@ static bool RunHttpProbe(const char *label, PADDRINFOEXW *deferredDnsResult = nu
             *deferredDnsResult = extended; // 首轮保留到控制器退出，验证关闭后仍能正确释放。
         else
             FreeAddrInfoExW(extended);
+    }
+    else if (std::string(dnsApi) == "windows" || std::string(dnsApi) == "windows-async")
+    {
+        const bool asynchronous = std::string(dnsApi) == "windows-async";
+        HANDLE completed = asynchronous ? CreateEventW(nullptr, TRUE, FALSE, nullptr) : nullptr;
+        if (asynchronous && !completed) return false;
+        DNS_QUERY_REQUEST3 request{};
+        request.Version = asynchronous ? DNS_QUERY_REQUEST_VERSION3 : DNS_QUERY_REQUEST_VERSION1;
+        request.QueryName = L"www.cloudflare.com";
+        request.QueryType = DNS_TYPE_A;
+        request.QueryOptions = DNS_QUERY_TREAT_AS_FQDN | (asynchronous ? 0 : DNS_QUERY_WIRE_ONLY);
+        request.pQueryCompletionCallback = asynchronous ? CompleteProbeDns : nullptr;
+        request.pQueryContext = completed;
+        DNS_QUERY_RESULT reply{};
+        reply.Version = DNS_QUERY_RESULTS_VERSION1;
+        DNS_QUERY_CANCEL cancel{};
+        auto status = DnsQueryEx(reinterpret_cast<DNS_QUERY_REQUEST *>(&request), &reply,
+                                 asynchronous ? &cancel : nullptr);
+        if (status == DNS_REQUEST_PENDING && completed)
+        {
+            if (WaitForSingleObject(completed, 15000) != WAIT_OBJECT_0)
+            {
+                DnsCancelQuery(&cancel);
+                WaitForSingleObject(completed, INFINITE);
+            }
+            status = reply.QueryStatus;
+            printf("%s WINDOWS_DNS_CALLBACK status=%ld\n", label, status);
+        }
+        if (completed) CloseHandle(completed);
+        resolveError = status ? status : EAI_NONAME;
+        for (auto record = reply.pQueryRecords; !status && record; record = record->pNext)
+        {
+            if (record->Flags.S.Section != DnsSectionAnswer || record->wType != DNS_TYPE_A)
+                continue;
+            char ip[INET_ADDRSTRLEN]{};
+            if (inet_ntop(AF_INET, &record->Data.A.IpAddress, ip, sizeof(ip)))
+            {
+                printf("%s WINDOWS_DNS status=%ld target=%s\n", label, status, ip);
+                hints.ai_flags = AI_NUMERICHOST;
+                resolveError = getaddrinfo(ip, "80", &hints, &resolved);
+                break;
+            }
+        }
+        if (reply.pQueryRecords) DnsRecordListFree(reply.pQueryRecords, DnsFreeRecordList);
     }
     else
         resolveError = getaddrinfo("www.cloudflare.com", "80", &hints, &resolved);

@@ -1,5 +1,5 @@
 // 拦截 DLL：接管指定进程的同步解析，以及 connect / ConnectEx 出站连接。
-// getaddrinfo 收到域名后，通过绑定物理网卡的独立 UDP socket 查询真实 DNS。
+// getaddrinfo 在物理网卡查询真实 DNS，支持该解析器的 HTTPS 端点和绑定接口的 UDP。
 // connect 建立连接前绑定同一物理出口；开关关闭或控制器退出后调用原 API。
 // 覆盖 IPv4 TCP、经 connect 建立的 IPv4 UDP 和同步解析；异步 DNS 仍透传。
 // 不单独接管 sendto / WSASendTo，不修改系统代理或加载过滤驱动。
@@ -18,6 +18,8 @@
 #include <mstcpip.h>
 #include <winhttp.h>
 #include <windns.h>
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
 #include <intrin.h>
 #include <wintrust.h>
 #include <softpub.h>
@@ -917,6 +919,40 @@ struct DnsAnswer
     IN_ADDR address{};
     bool isAddress{};
 };
+int SelectDnsAddress(const std::vector<DnsAnswer> &answers, const std::string &question,
+                     IN_ADDR &result, std::string *canonical)
+{
+    auto owner = question;
+    for (unsigned hops = 0; hops < 16; ++hops)
+    {
+        for (const auto &a : answers)
+        {
+            if (a.owner == owner && a.isAddress)
+            {
+                // 保留域名查询的真实 IPv4；fake-IP 与空地址作为解析失败处理。
+                const auto ip = ntohl(a.address.s_addr);
+                if (ip == 0 || (ip & 0xfffe0000u) == 0xc6120000u)
+                {
+                    return EAI_FAIL;
+                }
+                result = a.address;
+                if (canonical)
+                    *canonical = owner;
+                return 0;
+            }
+        }
+        auto next = std::find_if(answers.begin(), answers.end(), [&](const auto &a) {
+            return a.owner == owner && !a.isAddress && !a.alias.empty();
+        });
+        if (next == answers.end())
+        {
+            return EAI_NONAME;
+        }
+        owner = next->alias;
+    }
+    return EAI_FAIL;
+}
+
 int ParseDnsAnswer(const unsigned char *bytes, size_t size, uint16_t id,
                    const std::string &question, IN_ADDR &result, std::string *canonical = nullptr)
 {
@@ -989,39 +1025,84 @@ int ParseDnsAnswer(const unsigned char *bytes, size_t size, uint16_t id,
         }
         position += dataLength;
     }
-    auto owner = question;
-    for (unsigned hops = 0; hops < 16; ++hops)
-    {
-        for (const auto &a : answers)
-        {
-            if (a.owner == owner && a.isAddress)
-            {
-                // 保留域名查询的真实 IPv4；fake-IP 与空地址作为解析失败处理。
-                const auto ip = ntohl(a.address.s_addr);
-                if (ip == 0 || (ip & 0xfffe0000u) == 0xc6120000u)
-                {
-                    return EAI_FAIL;
-                }
-                result = a.address;
-                if (canonical)
-                    *canonical = owner;
-                return 0;
-            }
-        }
-        auto next = std::find_if(answers.begin(), answers.end(), [&](const auto &a) {
-            return a.owner == owner && !a.isAddress && !a.alias.empty();
-        });
-        if (next == answers.end())
-        {
-            return EAI_NONAME;
-        }
-        owner = next->alias;
-    }
-    return EAI_FAIL;
+    return SelectDnsAddress(answers, question, result, canonical);
 }
 
-// 使用独立的已绑定 UDP 套接字直接查询物理 DNS；不用系统 DNS 缓存。
-// 此最小验证仅取首个有效 A 记录；截断响应返回重试错误，未实现 TCP DNS。
+// Keep DNS on the selected interface when the default route to its resolver
+// goes elsewhere. A known HTTPS endpoint belongs to that same configured IP.
+bool ConfigurePhysicalDoh(const PhysicalNetworkConfig &config, DNS_CUSTOM_SERVER &server)
+{
+    static const bool supportsCustomServers =
+        GetProcAddress(GetModuleHandleW(L"dnsapi.dll"), "DnsGetApplicationSettings") != nullptr;
+    if (!supportsCustomServers) return false;
+    wchar_t ip[INET_ADDRSTRLEN]{};
+    if (!InetNtopW(AF_INET, &config.dns, ip, INET_ADDRSTRLEN)) return false;
+    static wchar_t primary[] = L"https://223.5.5.5/dns-query";
+    static wchar_t secondary[] = L"https://223.6.6.6/dns-query";
+    if (wcscmp(ip, L"223.5.5.5") == 0) server.pwszTemplate = primary;
+    else if (wcscmp(ip, L"223.6.6.6") == 0) server.pwszTemplate = secondary;
+    else return false;
+
+    DWORD best = 0;
+    if (GetBestInterface(config.dns.s_addr, &best) != NO_ERROR || !best || best == config.index)
+        return false;
+    server.dwServerType = DNS_CUSTOM_SERVER_TYPE_DOH;
+    server.ServerAddr.Ipv4.sin_family = AF_INET;
+    server.ServerAddr.Ipv4.sin_addr = config.dns;
+    return true;
+}
+
+int ResolveOverPhysicalHttps(const std::string &name, const PhysicalNetworkConfig &config,
+                             DNS_CUSTOM_SERVER &server, IN_ADDR &address, std::string *canonical)
+{
+    const std::wstring wideName(name.begin(), name.end());
+    DNS_QUERY_REQUEST3 request{};
+    request.Version = DNS_QUERY_REQUEST_VERSION3;
+    request.QueryName = wideName.c_str();
+    request.QueryType = DNS_TYPE_A;
+    request.QueryOptions = DNS_QUERY_WIRE_ONLY | DNS_QUERY_TREAT_AS_FQDN;
+    request.InterfaceIndex = config.index;
+    request.cCustomServers = 1;
+    request.pCustomServers = &server;
+    DNS_QUERY_RESULT reply{};
+    reply.Version = DNS_QUERY_RESULTS_VERSION1;
+    const auto status = OriginalDnsQueryEx(reinterpret_cast<PDNS_QUERY_REQUEST>(&request), &reply, nullptr);
+    const auto freeRecords = [](DNS_RECORD *records) { DnsRecordListFree(records, DnsFreeRecordList); };
+    std::unique_ptr<DNS_RECORD, decltype(freeRecords)> records(reply.pQueryRecords, freeRecords);
+    char receipt[96]{};
+    _snprintf_s(receipt, sizeof(receipt), _TRUNCATE, "dns https if=%lu status=%ld", config.index, status);
+    WriteTestReceipt(receipt);
+    if (status == DNS_ERROR_RCODE_NAME_ERROR || status == DNS_INFO_NO_RECORDS) return EAI_NONAME;
+    if (status != ERROR_SUCCESS) return EAI_AGAIN;
+    auto asciiName = [](PCWSTR value) {
+        std::string text;
+        for (; value && *value; ++value)
+        {
+            if (*value > 127 || text.size() == 254) return std::string{};
+            text.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*value))));
+        }
+        if (!text.empty() && text.back() == '.') text.pop_back();
+        return text;
+    };
+    std::vector<DnsAnswer> answers;
+    for (auto record = reinterpret_cast<DNS_RECORDW *>(records.get()); record; record = record->pNext)
+    {
+        if (record->Flags.S.Section != DnsSectionAnswer) continue;
+        if (answers.size() >= 128) return EAI_FAIL;
+        if (record->wType == DNS_TYPE_A)
+        {
+            DnsAnswer a{asciiName(record->pName), {}, {}, true};
+            a.address.s_addr = record->Data.A.IpAddress;
+            answers.push_back(a);
+        }
+        else if (record->wType == DNS_TYPE_CNAME)
+            answers.push_back({asciiName(record->pName), asciiName(record->Data.CNAME.pNameHost), {}, false});
+    }
+    return SelectDnsAddress(answers, name, address, canonical);
+}
+
+// 两条传输路径都查询选定网卡上的 DNS，并沿 CNAME 链取第一个有效 A 记录。
+// UDP 路径使用独立套接字，截断响应返回重试错误。
 int ResolveViaPhysicalDns(const std::string &input, const PhysicalNetworkConfig &networkConfig,
                           IN_ADDR &result, std::string *canonical = nullptr)
 {
@@ -1072,6 +1153,13 @@ int ResolveViaPhysicalDns(const std::string &input, const PhysicalNetworkConfig 
     query.push_back(0);
     AppendNetworkUInt16(query, 1);
     AppendNetworkUInt16(query, 1);
+    DNS_CUSTOM_SERVER secureServer{};
+    if (ConfigurePhysicalDoh(networkConfig, secureServer))
+    {
+        const int status = ResolveOverPhysicalHttps(name, networkConfig, secureServer, result, canonical);
+        if (status != EAI_AGAIN) return status;
+        // If HTTPS is unavailable, retry the original interface-bound UDP transport.
+    }
     SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (socket == INVALID_SOCKET)
     {
@@ -1159,6 +1247,7 @@ struct AsyncDnsQuery
 {
     volatile LONG references = 2; // submitting thread and possible completion
     DNS_QUERY_REQUEST3 request{};
+    DNS_CUSTOM_SERVER server{};
     PDNS_QUERY_COMPLETION_ROUTINE completion = nullptr;
     PVOID context = nullptr;
     void Release() noexcept
@@ -1187,6 +1276,7 @@ DNS_STATUS WINAPI HookDnsQueryEx(PDNS_QUERY_REQUEST request, PDNS_QUERY_RESULT r
     const WORD type = request ? request->QueryType : 0;
     const bool asynchronous = request && request->pQueryCompletionCallback;
     DNS_QUERY_REQUEST3 copy{};
+    DNS_CUSTOM_SERVER server{};
     AsyncDnsQuery *pending = nullptr;
     bool synchronousCopy = false;
     try
@@ -1206,6 +1296,15 @@ DNS_STATUS WINAPI HookDnsQueryEx(PDNS_QUERY_REQUEST request, PDNS_QUERY_RESULT r
             memcpy(&copy, request, request->Version == DNS_QUERY_REQUEST_VERSION3 ?
                 sizeof(DNS_QUERY_REQUEST3) : sizeof(DNS_QUERY_REQUEST));
             copy.InterfaceIndex = config.index;
+            const auto specialTransport = DNS_QUERY_USE_TCP_ONLY | DNS_QUERY_NO_WIRE_QUERY | DNS_QUERY_MULTICAST_ONLY;
+            if (copy.QueryName && wcschr(copy.QueryName, L'.') &&
+                !(copy.QueryOptions & specialTransport) && ConfigurePhysicalDoh(config, server))
+            {
+                server.ullFlags = DNS_CUSTOM_SERVER_UDP_FALLBACK;
+                copy.Version = DNS_QUERY_REQUEST_VERSION3;
+                copy.cCustomServers = 1;
+                copy.pCustomServers = &server;
+            }
             if (!asynchronous)
                 synchronousCopy = true;
             else
@@ -1216,6 +1315,11 @@ DNS_STATUS WINAPI HookDnsQueryEx(PDNS_QUERY_REQUEST request, PDNS_QUERY_RESULT r
                     if (pending)
                     {
                         pending->request = copy;
+                        if (copy.pCustomServers)
+                        {
+                            pending->server = server;
+                            pending->request.pCustomServers = &pending->server;
+                        }
                         pending->completion = copy.pQueryCompletionCallback;
                         pending->context = copy.pQueryContext;
                         pending->request.pQueryCompletionCallback = CompletePhysicalDns;
