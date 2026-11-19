@@ -145,9 +145,8 @@
             </ControlTemplate.Triggers>
         </ControlTemplate></Setter.Value></Setter>
     </Style>
-    <CroppedBitmap x:Key="MenuSmokeTexture" Source="Assets/ZdCMark.png" SourceRect="730,35,550,220"/>
-    <ImageBrush x:Key="MenuSmokeBrush" ImageSource="{StaticResource MenuSmokeTexture}" Stretch="Fill"/>
-    <ImageBrush x:Key="RedMenuSmokeBrush" ImageSource="{local:InkTint Source={StaticResource MenuSmokeTexture}, Ink=#9C282C}" Stretch="Fill"/>
+    <ImageBrush x:Key="MenuSmokeBrush" ImageSource="Assets/ZdCMark.png" ViewboxUnits="Absolute" Viewbox="730,35,550,220" Stretch="Fill"/>
+    <local:InkTintExtension x:Key="RedMenuSmokeBrush" Source="{StaticResource MenuSmokeBrush}" Ink="#9C282C"/>
     <Style TargetType="MenuItem"><Setter Property="HeaderTemplate"><Setter.Value><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></Setter.Value></Setter>
         <Setter Property="MinWidth" Value="146"/><Setter Property="Height" Value="36"/><Setter Property="Cursor" Value="Hand"/>
         <Setter Property="ToolTipService.IsEnabled" Value="False"/>
