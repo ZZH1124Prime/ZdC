@@ -9,6 +9,8 @@
 #include <ws2tcpip.h> // 域名解析、IPv4 地址转换和接口选项。
 #include <iphlpapi.h>
 #include <windns.h>
+#include <wininet.h>
+#pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "dnsapi.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #include <mswsock.h> // ConnectEx 扩展函数。
@@ -194,17 +196,135 @@ static void WINAPI CompleteProbeDns(void *context, DNS_QUERY_RESULT *)
     SetEvent(static_cast<HANDLE>(context));
 }
 
+// WinINet PRECONFIG follows the user's normal proxy settings. Read the actual
+// HTTPS socket and the public trace, with no cookies, login, cache or UI.
+static bool RunWinInetProbe(const char *label)
+{
+    struct InternetHandle
+    {
+        HINTERNET handle;
+        ~InternetHandle() { if (handle) InternetCloseHandle(handle); }
+    };
+    InternetHandle session{InternetOpenW(L"ZdC.SocketProbe", INTERNET_OPEN_TYPE_PRECONFIG,
+                                         nullptr, nullptr, 0)};
+    if (!session.handle) return false;
+    DWORD timeout = 6000;
+    for (DWORD option : {INTERNET_OPTION_CONNECT_TIMEOUT, INTERNET_OPTION_SEND_TIMEOUT,
+                         INTERNET_OPTION_RECEIVE_TIMEOUT})
+        if (!InternetSetOptionW(session.handle, option, &timeout, sizeof(timeout))) return false;
+    constexpr DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+        INTERNET_FLAG_NO_COOKIES | INTERNET_FLAG_NO_AUTH | INTERNET_FLAG_NO_AUTO_REDIRECT |
+        INTERNET_FLAG_NO_UI;
+    InternetHandle request{InternetOpenUrlW(session.handle, L"https://www.cloudflare.com/cdn-cgi/trace",
+                                           nullptr, 0, flags, 0)};
+    if (!request.handle)
+    {
+        printf("%s WININET_OPEN_ERROR %lu\n", label, GetLastError());
+        return false;
+    }
+    DWORD status = 0, size = sizeof(status);
+    if (!HttpQueryInfoW(request.handle, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                       &status, &size, nullptr) || status != 200) return false;
+    INTERNET_DIAGNOSTIC_SOCKET_INFO info{};
+    size = sizeof(info);
+    if (!InternetQueryOptionW(request.handle, INTERNET_OPTION_DIAGNOSTIC_SOCKET_INFO, &info, &size))
+    {
+        printf("%s WININET_SOCKET_ERROR %lu\n", label, GetLastError());
+        return false;
+    }
+    sockaddr_in local{}, peer{};
+    int localSize = sizeof(local), peerSize = sizeof(peer);
+    if (getsockname(info.Socket, reinterpret_cast<sockaddr *>(&local), &localSize) != 0 ||
+        getpeername(info.Socket, reinterpret_cast<sockaddr *>(&peer), &peerSize) != 0 ||
+        local.sin_family != AF_INET || peer.sin_family != AF_INET)
+    {
+        printf("%s WININET_ENDPOINT_ERROR %d\n", label, WSAGetLastError());
+        return false;
+    }
+    char source[INET_ADDRSTRLEN]{}, target[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &local.sin_addr, source, sizeof(source));
+    inet_ntop(AF_INET, &peer.sin_addr, target, sizeof(target));
+    printf("%s WININET local=%s target=%s:%u flags=%lu status=%lu\n",
+           label, source, target, ntohs(peer.sin_port), info.Flags, status);
+    std::string body;
+    char buffer[1024];
+    DWORD count = 0;
+    do
+    {
+        if (!InternetReadFile(request.handle, buffer, sizeof(buffer), &count) ||
+            body.size() + count > 8192) return false;
+        body.append(buffer, count);
+    } while (count);
+    const auto start = body.find("\nip=");
+    if (start == std::string::npos) return false;
+    const auto end = body.find_first_of("\r\n", start + 4);
+    const auto publicIp = body.substr(start + 4, end - (start + 4));
+    IN_ADDR ipv4{};
+    IN6_ADDR ipv6{};
+    if (inet_pton(AF_INET, publicIp.c_str(), &ipv4) != 1 &&
+        inet_pton(AF_INET6, publicIp.c_str(), &ipv6) != 1) return false;
+    printf("%s ip=%s\n", label, publicIp.c_str());
+    const auto remote = ntohl(peer.sin_addr.s_addr);
+    if (strstr(label, "HOOK_ACTIVE") && ((info.Flags & (IDSI_FLAG_PROXY | IDSI_FLAG_TUNNEL)) ||
+        (remote >> 24) == 127 || (remote & 0xfffe0000u) == 0xc6120000u)) return false;
+    return ExpectedSourceMatches(label, source, target);
+}
+
 static bool RunHttpProbe(const char *label, PADDRINFOEXW *deferredDnsResult = nullptr)
 {
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo *resolved = nullptr;
+    if (GetEnvironmentVariableA("ZDC_PROBE_WININET", nullptr, 0)) return RunWinInetProbe(label);
     const long long dnsBegin = TimestampTicks();
     char dnsApi[32]{};
     GetEnvironmentVariableA("ZDC_PROBE_DNS", dnsApi, sizeof(dnsApi));
     int resolveError = 0;
-    if (std::string(dnsApi) == "extended")
+    if (std::string(dnsApi) == "legacy" || std::string(dnsApi) == "wide")
+    {
+        IN_ADDR address{};
+        if (std::string(dnsApi) == "legacy")
+        {
+#pragma warning(push)
+#pragma warning(disable : 4996) // This mode specifically exercises the legacy resolver.
+            const hostent *host = gethostbyname("www.cloudflare.com");
+#pragma warning(pop)
+            if (!host) resolveError = WSAGetLastError();
+            else if (host->h_addrtype != AF_INET || host->h_length != sizeof(address) ||
+                     !host->h_addr_list || !host->h_addr_list[0]) resolveError = EAI_NONAME;
+            else memcpy(&address, host->h_addr_list[0], sizeof(address));
+        }
+        else
+        {
+            ADDRINFOW wideHints{};
+            wideHints.ai_family = AF_UNSPEC;
+            wideHints.ai_socktype = SOCK_STREAM;
+            PADDRINFOW result = nullptr;
+            resolveError = GetAddrInfoW(L"www.cloudflare.com", L"80", &wideHints, &result);
+            if (!resolveError)
+            {
+                resolveError = EAI_NONAME;
+                for (auto entry = result; entry; entry = entry->ai_next)
+                    if (entry->ai_family == AF_INET && entry->ai_addr && entry->ai_addrlen >= sizeof(sockaddr_in))
+                    {
+                        address = reinterpret_cast<const sockaddr_in *>(entry->ai_addr)->sin_addr;
+                        resolveError = 0;
+                        break;
+                    }
+            }
+            if (result) FreeAddrInfoW(result);
+        }
+        if (!resolveError)
+        {
+            char ip[INET_ADDRSTRLEN]{};
+            if (!inet_ntop(AF_INET, &address, ip, sizeof(ip))) return false;
+            printf("%s DNS_API=%s target=%s\n", label, dnsApi, ip);
+            hints.ai_flags = AI_NUMERICHOST;
+            resolveError = getaddrinfo(ip, "80", &hints, &resolved);
+        }
+    }
+    else if (std::string(dnsApi) == "extended")
     {
         ADDRINFOEXW extendedHints{};
         extendedHints.ai_family = AF_UNSPEC;
