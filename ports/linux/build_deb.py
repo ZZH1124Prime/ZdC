@@ -50,7 +50,13 @@ def build(destination):
              (ROOT / "src/ZdC.App/Assets/ZdCMark.png", "usr/share/zdc/ui/ZdCMark.png", 0o644)]
     for name in ("index.html", "style.css", "model.js", "ui.js"):
         files.append((HERE.parent / "shared" / name, "usr/share/zdc/ui/" + name, 0o644))
-    data = tar_gz((name, src.read_bytes(), mode) for src, name, mode in files)
+    contents = []
+    for src, name, mode in files:
+        payload = src.read_bytes()
+        if src.suffix != ".png":
+            payload = payload.replace(b"\r\n", b"\n")
+        contents.append((name, payload, mode))
+    data = tar_gz(contents)
     members = [("debian-binary", b"2.0\n"),
                ("control.tar.gz", tar_gz([("control", CONTROL.encode(), 0o644)])),
                ("data.tar.gz", data)]
