@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ZdC
+Comment=Manage application routing rules
+Comment[zh_CN]=管理应用名单与进程分流规则
+Exec=zdc
+Icon=zdc
+Terminal=false
+Categories=Network;
+StartupNotify=true

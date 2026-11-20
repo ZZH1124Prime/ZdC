@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<title>ZdC · 应用名单</title>
+<link rel="stylesheet" href="style.css">
+<script defer src="model.js"></script>
+<script defer src="ui.js"></script>
+</head>
+<body>
+<main>
+<header><img src="ZdCMark.png" alt="ZdC"><div><h1>应用名单</h1><p id="platform">读取本地名单…</p></div></header>
+<div class="actions"><button id="pick" disabled>添加应用</button><button id="export" disabled>导出规则集</button></div>
+<p id="feedback" role="status" aria-live="polite"></p>
+<p id="empty" hidden>还没有登记应用。添加后可以在这里启动应用或导出规则。</p>
+<ul id="entries" aria-label="已登记的应用"></ul>
+<details><summary>怎样让规则生效？</summary>
+<p>在支持本地规则集的 mihomo 客户端中导入导出的 YAML，选择 classical 格式，并将该规则集交给 DIRECT。把它放在通配或兜底规则之前。若客户端无法识别进程，规则不会命中。</p>
+<p>名单编辑保存在 ZdC。每次修改后需重新导出，并在客户端重载。退出 ZdC 后已导入的规则仍由客户端管理。撤销时，在客户端移除该规则集的引用并重载。</p>
+<p>启动应用仅打开原入口。可用客户端连接日志检查新连接命中了哪条规则。</p>
+</details>
+</main>
+</body>
+</html>
