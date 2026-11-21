@@ -187,7 +187,7 @@ public final class MainActivity extends Activity {
             new AlertDialog.Builder(this).setMessage("写入失败：" + error.getLocalizedMessage()).setPositiveButton("确定", null).show();
             return;
         }
-        android.widget.Toast.makeText(this, "规则集已写入，请在客户端导入或重载。", android.widget.Toast.LENGTH_LONG).show();
+        android.widget.Toast.makeText(this, "规则集已导出，请在代理客户端导入本次导出的文件。", android.widget.Toast.LENGTH_LONG).show();
     }
 
     @Override protected void onDestroy() {
