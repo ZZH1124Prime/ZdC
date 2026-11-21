@@ -116,6 +116,8 @@ partial class SetupWindow : Window
         var title=Label("安装 ZdC",27); title.Foreground=(Brush)FindResource("StoneGlyph"); header.Children.Add(title);
         header.MouseLeftButtonDown+=(s,e)=>{if(e.ButtonState==MouseButtonState.Pressed)DragMove();};
         body.Children.Add(header);
+        folder.Text=System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"ZdC");
+        desktop.IsChecked=true;
         body.Children.Add(Label("安装位置"));
         browseButton=ActionButton("浏览…",Browse);DockPanel.SetDock(browseButton,Dock.Right);locationLine.Children.Add(browseButton);
         folder.Height=35;folder.Padding=new Thickness(6,2,6,2);folder.VerticalContentAlignment=VerticalAlignment.Center;
@@ -144,15 +146,20 @@ partial class SetupWindow : Window
     {
         folder.IsReadOnly=updating || !enabled;browseButton.IsEnabled=enabled && !updating;desktop.IsEnabled=enabled;
     }
-    private void LoadOptions()
+    private bool RefreshRegistration()
     {
         try {
             existing=InstallEngine.Find();updating=existing!=null;
-            if(updating && Version.Parse(existing.Version)>Version.Parse(Identity.Version)){Editable(false);Fault(1638,LoadOptions);return;}
-            folder.Text=updating?existing.Directory.TrimEnd('\\'):System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"ZdC");
-            desktop.IsChecked=true;Editable(true);status.Text="";progress.Visibility=Visibility.Hidden;
-            Buttons(ActionButton("安装",Begin,true),ActionButton("取消",Close));
-        } catch(Exception e){Editable(false);Fault(ErrorNumber(e),LoadOptions);}
+            if(updating && Version.Parse(existing.Version)>Version.Parse(Identity.Version)){Editable(false);Fault(1638,LoadOptions);return false;}
+            if(updating) folder.Text=existing.Directory.TrimEnd('\\');
+            Editable(true);return true;
+        } catch(Exception e){Editable(false);Fault(ErrorNumber(e),LoadOptions);return false;}
+    }
+    private void LoadOptions()
+    {
+        if(!RefreshRegistration())return;
+        status.Text="";progress.Visibility=Visibility.Hidden;
+        Buttons(ActionButton("安装",Begin,true),ActionButton("取消",Close));
     }
     private void Browse()
     {
@@ -180,7 +187,7 @@ partial class SetupWindow : Window
     }
     private async void Begin()
     {
-        if(busy)return;
+        if(busy || !RefreshRegistration())return;
         string path;
         try {
             if(InstallEngine.AppRunning()){Problem("请先退出 ZdC，再继续。");return;}
