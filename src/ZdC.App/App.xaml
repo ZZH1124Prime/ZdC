@@ -147,6 +147,7 @@
     </Style>
     <ImageBrush x:Key="MenuSmokeBrush" ImageSource="Assets/ZdCMark.png" ViewboxUnits="Absolute" Viewbox="730,35,550,220" Stretch="Fill"/>
     <local:InkTintExtension x:Key="RedMenuSmokeBrush" Source="{StaticResource MenuSmokeBrush}" Ink="#9C282C"/>
+    <local:InkTintExtension x:Key="GreenMenuSmokeBrush" Source="{StaticResource MenuSmokeBrush}" Ink="#237244"/>
     <Style TargetType="MenuItem"><Setter Property="HeaderTemplate"><Setter.Value><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></Setter.Value></Setter>
         <Setter Property="MinWidth" Value="146"/><Setter Property="Height" Value="36"/><Setter Property="Cursor" Value="Hand"/>
         <Setter Property="ToolTipService.IsEnabled" Value="False"/>
@@ -156,11 +157,25 @@
                     <Rectangle.OpacityMask><RadialGradientBrush><GradientStop Color="White" Offset="0.3"/><GradientStop Color="Transparent" Offset="1"/></RadialGradientBrush></Rectangle.OpacityMask>
                     <Rectangle.RenderTransform><TranslateTransform x:Name="MenuRise"/></Rectangle.RenderTransform>
                 </Rectangle>
-                <ContentPresenter ContentSource="Header" Margin="12,0,12,0" VerticalAlignment="Center"/>
+                <Ellipse x:Name="StateDot" Width="10" Height="10" Margin="11,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                         Visibility="Collapsed" StrokeThickness="1.2" Fill="{Binding Fill, ElementName=MenuSmoke}"/>
+                <ContentPresenter x:Name="MenuLabel" ContentSource="Header" Margin="12,0,12,0" VerticalAlignment="Center"/>
             </Grid>
             <ControlTemplate.Triggers>
                 
                 
+                <Trigger Property="IsCheckable" Value="True">
+                    <Setter TargetName="StateDot" Property="Visibility" Value="Visible"/>
+                    <Setter TargetName="StateDot" Property="Stroke" Value="#9C282C"/>
+                    <Setter TargetName="MenuLabel" Property="Margin" Value="28,0,12,0"/>
+                    <Setter TargetName="MenuSmoke" Property="Fill" Value="{StaticResource RedMenuSmokeBrush}"/>
+                </Trigger>
+                <MultiTrigger><MultiTrigger.Conditions>
+                    <Condition Property="IsCheckable" Value="True"/><Condition Property="IsChecked" Value="True"/>
+                </MultiTrigger.Conditions>
+                    <Setter TargetName="StateDot" Property="Stroke" Value="{StaticResource StatusSuccess}"/>
+                    <Setter TargetName="MenuSmoke" Property="Fill" Value="{StaticResource GreenMenuSmokeBrush}"/>
+                </MultiTrigger>
                 <Trigger Property="Tag" Value="ForceStop">
                     <Setter TargetName="MenuSmoke" Property="Fill" Value="{StaticResource RedMenuSmokeBrush}"/>
                 </Trigger>

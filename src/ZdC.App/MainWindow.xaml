@@ -26,6 +26,21 @@
 <Path Data="M 14,3 L 12,8 15,12 L 11,15 14,20 L 12,24 M 3,13 L 8,12 11,15 M 15,12 L 19,14 23,13" Stroke="#201C1A" StrokeThickness="0.55" Opacity="0.75"/>
 <Path Data="M 12,8 L 14,10 M 6,12 L 9,13 M 16,13 L 20,15" Stroke="#94857B" StrokeThickness="0.4"/>
 </Grid></Button>
+<Grid Width="2" Height="20" VerticalAlignment="Center"><Rectangle Width="1" Fill="#C8C3BC" HorizontalAlignment="Left"/><Rectangle Width="1" Fill="#FCFAF6" HorizontalAlignment="Right"/></Grid>
+<Button x:Name="SettingsButton" Style="{StaticResource StoneHeaderButton}" Click="Settings_Click"
+        AutomationProperties.Name="{Binding ContextMenu.Items[0].Header, RelativeSource={RelativeSource Self}}">
+    <Button.Resources>
+        <Geometry x:Key="GearShape">F0 M 10,1 L 15,1 15.5,4 18,5.2 20.7,3.8 23.5,7.4 21.3,9.5 21.8,12.3 24.5,13.6 23.5,18 20.3,18 18.6,20.2 19,23.2 14.6,24.8 12.8,22.2 10.2,22 8.2,24.4 4.2,22.2 5.1,19.2 3.6,17 0.6,16.5 0.4,12 3.4,11 4.3,8.4 2.7,5.8 6.2,2.8 8.9,4.2 Z M 17,13 A 4.3,4.3 0 1 0 8.4,13 A 4.3,4.3 0 1 0 17,13 Z</Geometry>
+    </Button.Resources>
+    <Button.ContextMenu><ContextMenu Placement="Bottom">
+        <MenuItem x:Name="TrayOption" Header="关闭后最小化到托盘" IsCheckable="True" Click="TrayOption_Click"/>
+    </ContextMenu></Button.ContextMenu>
+    <Grid Width="26" Height="28" VerticalAlignment="Center">
+        <Path Data="{StaticResource GearShape}" Fill="#FDFBF7"><Path.RenderTransform><TranslateTransform X="0.5" Y="0.7"/></Path.RenderTransform></Path>
+        <Path Data="{StaticResource GearShape}" Fill="{StaticResource StoneGlyph}" Stroke="#302B2A" StrokeThickness="0.65" StrokeLineJoin="Miter"/>
+        <Path Data="M 10.5,2 L 14,2 M 4,12 L 1.5,12.8 M 6.6,4 L 8.7,5 M 16.7,14.5 A 4.9,4.9 0 0 1 9,16.4" Stroke="#B7AAA1" StrokeThickness="0.65" Opacity="0.85"/>
+    </Grid>
+</Button>
 <Grid Width="2" Height="20" VerticalAlignment="Center"><Rectangle Width="1" Fill="#C8C3BC" HorizontalAlignment="Left"/><Rectangle Width="1" Fill="#FCFAF6" HorizontalAlignment="Right"/></Grid><Button  Style="{StaticResource StoneHeaderButton}" Click="Minimize_Click" AutomationProperties.Name="最小化"><Grid Width="18" Height="18"><Path Data="M 3,9 L 15,9" Stroke="#FCFAF7" StrokeThickness="1.8"><Path.RenderTransform><TranslateTransform Y="1"/></Path.RenderTransform></Path><Path Data="M 3,9 L 15,9" Stroke="{StaticResource StoneGlyph}" StrokeThickness="1.7" StrokeLineJoin="Miter"/></Grid></Button>
 <Grid Width="2" Height="20" VerticalAlignment="Center"><Rectangle Width="1" Fill="#C8C3BC" HorizontalAlignment="Left"/><Rectangle Width="1" Fill="#FCFAF6" HorizontalAlignment="Right"/></Grid><Button  Style="{StaticResource StoneHeaderButton}" Click="Maximize_Click" AutomationProperties.Name="最大化或还原"><Grid Width="18" Height="18"><Path Data="M 4,4 L 14,4 14,14 4,14 Z" Stroke="#FCFAF7" StrokeThickness="1.8"><Path.RenderTransform><TranslateTransform Y="1"/></Path.RenderTransform></Path><Path Data="M 4,4 L 14,4 14,14 4,14 Z" Stroke="{StaticResource StoneGlyph}" StrokeThickness="1.7" StrokeLineJoin="Miter"/></Grid></Button>
 <Grid Width="2" Height="20" VerticalAlignment="Center"><Rectangle Width="1" Fill="#C8C3BC" HorizontalAlignment="Left"/><Rectangle Width="1" Fill="#FCFAF6" HorizontalAlignment="Right"/></Grid><Button  Style="{StaticResource StoneHeaderButton}" Click="Close_Click" AutomationProperties.Name="关闭"><Grid Width="18" Height="18"><Path Data="M 4,4 L 14,14 M 14,4 L 4,14" Stroke="#FCFAF7" StrokeThickness="1.8"><Path.RenderTransform><TranslateTransform Y="1"/></Path.RenderTransform></Path><Path Data="M 4,4 L 14,14 M 14,4 L 4,14" Stroke="{StaticResource StoneGlyph}" StrokeThickness="1.7" StrokeLineJoin="Miter"/></Grid></Button>

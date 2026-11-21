@@ -26,9 +26,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        Loaded += async (_, _) => await LoadAsync();
+        TrayOption.IsChecked = TrayPreference.Enabled;
+        Loaded += OnInitialLoad;
+        Application.Current.Exit += Application_Exit;
         Closing += OnClosing;
-        _statusTimer.Tick += async (_, _) => await RefreshStatesAsync();
+        _statusTimer.Tick += async (_, _) => { if (IsVisible) await RefreshStatesAsync(); };
     }
 
     // 自绘标题栏仍使用 Windows 原生窗口操作，业务关闭流程继续走 OnClosing。
@@ -93,7 +95,11 @@ public partial class MainWindow : Window
     }
     private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
     private void Maximize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    private async void OnInitialLoad(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnInitialLoad;
+        await LoadAsync();
+    }
     private void Help_Click(object sender, RoutedEventArgs e) => PaperDialog.ShowMessage(this, "使用说明",
         "拖入应用或快捷方式，也可点右上角 ＋ 添加。\n\n" +
         "点未运行的应用图标，从 ZdC 启动；已运行时再点图标，单独切换此应用直连。已有普通实例时，先正常退出该应用。\n\n" +
@@ -460,11 +466,11 @@ public partial class MainWindow : Window
         SetBusy(true);
         try
         {
-            await _applications.DisposeAsync();
+            await StopSessionsAsync();
             _shutdownCompleted = true;
             _ = Dispatcher.BeginInvoke(new Action(Close));
         }
-        catch (Exception ex) { StatusText.Text = $"停止接管失败：{ex.Message} 可再次关闭重试。"; _statusTimer.Start(); }
+        catch (Exception ex) { _shutdownTask = null; StatusText.Text = $"停止接管失败：{ex.Message} 可再次关闭重试。"; _statusTimer.Start(); }
         finally { SetBusy(false); }
     }
 }
