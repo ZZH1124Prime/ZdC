@@ -15,7 +15,6 @@ except ValueError:
 from gi.repository import Gio, GLib, Gtk, WebKit2
 
 UI = Path("/usr/share/zdc/ui")
-RESOURCES = {"index.html", "style.css", "model.js", "ui.js", "ZdCMark.png"}
 START = "zdc://app/index.html"
 STATE = Path(GLib.get_user_config_dir()) / "zdc" / "applications.json"
 
@@ -52,6 +51,8 @@ class ZdC(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.zdc.App",
                          flags=Gio.ApplicationFlags.FLAGS_NONE)
+        sources = (UI / "web-assets.list").read_text(encoding="utf-8").splitlines()
+        self.resources = {Path(source).name for source in sources}
 
     def do_activate(self):
         if self.get_active_window():
@@ -73,7 +74,7 @@ class ZdC(Gtk.Application):
 
     def resource(self, request, unused):
         name = request.get_path().lstrip("/")
-        if name not in RESOURCES or request.get_uri() != "zdc://app/" + name:
+        if name not in self.resources or request.get_uri() != "zdc://app/" + name:
             request.finish_error(GLib.Error.new_literal(Gio.io_error_quark(), "Unknown asset", Gio.IOErrorEnum.NOT_FOUND))
             return
         try:

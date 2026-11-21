@@ -2,6 +2,8 @@
 
 两端使用同一份本地界面、应用名单格式、规则生成器和现有 ZdC 标志。Windows 的入口在 `src/ZdC.App`。Linux 和 Android 的平台代码负责系统选择器、启动、持久化和文件导出。
 
+更改内置页面资源时，维护 `ports/shared/web-assets.list`。每行是相对仓库根目录的源文件路径，文件名须唯一。两个安装包都按文件名提供页面资源，原生入口使用同一份清单限制页面可以读取的文件。
+
 ## 构建
 
 - **Linux 安装包**　在仓库根目录执行 `python3 ports/linux/build_deb.py`。产物为 `artifacts/zdc_0.1.0~preview1_all.deb`。Ubuntu 20.04 桌面可用 `sudo apt install ./artifacts/zdc_0.1.0~preview1_all.deb` 安装，从应用菜单打开 ZdC。卸载命令为 `sudo apt remove zdc`，名单保存在当前用户的 XDG 配置目录下。
@@ -25,5 +27,9 @@ rule-providers:
 
 4. 在客户端重载后启动已登记的应用，并从连接日志核对新连接命中的规则与出站。应用未走该核心、核心未识别进程或规则被更高优先级覆盖时，名单无法决定实际路径。未登记应用继续匹配原有规则。升级后路径或包名有变化时，移除旧入口并登记新入口。
 5. 重新编辑名单后要重新导出并重载。关闭 ZdC 后，已导入的规则继续由客户端执行。撤销时，移除客户端内对应的 `RULE-SET` 和 provider 条目并重载。当前预览提供可审查的规则交接，实际连接状态以客户端日志为准。
+
+Linux 应用升级时，即使安装路径相同，也建议完全退出旧进程再启动。在 Ubuntu 20.04 和 mihomo 1.19.34 的同路径原子替换试验中，旧进程已建立的连接继续直连。旧进程随后新建连接时，核心报告的可执行文件路径带有 ` (deleted)`，精确路径规则失配，连接落到已有的兜底代理。重新启动的程序恢复命中原路径规则。
+
+mihomo 1.19.34 对普通进程路径使用忽略大小写的比较。Linux 上的两个可执行文件如果仅在路径大小写上有区别，登记其中一个时，另一个也可能命中同一规则。[mihomo 对应版本的匹配实现](https://github.com/MetaCubeX/mihomo/blob/v1.19.34/rules/common/process.go)
 
 Android 预览使用现有代理核心合作模式。每个用户档案只有一个活动 VPN，启动另一项 VPN 服务会替换它。本版只使用包启动入口及系统文件选择器，无需 VPN 授权。[Android VPN](https://developer.android.com/develop/connectivity/vpn) · [mihomo 进程规则](https://wiki.metacubex.one/en/config/rules/) · [规则集](https://wiki.metacubex.one/en/config/rule-providers/)

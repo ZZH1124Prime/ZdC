@@ -43,13 +43,17 @@ def tar_gz(files):
 
 
 def build(destination):
+    manifest = HERE.parent / "shared" / "web-assets.list"
     files = [(HERE / "zdc.py", "usr/bin/zdc", 0o755),
              (HERE / "zdc.desktop", "usr/share/applications/zdc.desktop", 0o644),
              (ROOT / "COPYING", "usr/share/doc/zdc/copyright", 0o644),
-             (HERE.parent / "shared" / "launcher.png", "usr/share/icons/hicolor/192x192/apps/zdc.png", 0o644),
-             (ROOT / "src/ZdC.App/Assets/ZdCMark.png", "usr/share/zdc/ui/ZdCMark.png", 0o644)]
-    for name in ("index.html", "style.css", "model.js", "ui.js"):
-        files.append((HERE.parent / "shared" / name, "usr/share/zdc/ui/" + name, 0o644))
+             (HERE.parent / "shared" / "launcher.png", "usr/share/icons/hicolor/192x192/apps/zdc.png", 0o644)]
+    web_files = [manifest]
+    web_files.extend(ROOT / source for source in manifest.read_text(encoding="utf-8").splitlines())
+    if len({src.name for src in web_files}) != len(web_files):
+        raise ValueError("Web asset filenames must be unique")
+    for src in web_files:
+        files.append((src, "usr/share/zdc/ui/" + src.name, 0o644))
     contents = []
     for src, name, mode in files:
         payload = src.read_bytes()

@@ -40,14 +40,13 @@ import java.util.Set;
 public final class MainActivity extends Activity {
     private static final int CREATE_RULES = 21;
     private static final String BASE = "https://appassets.androidplatform.net/assets/";
-    private static final Set<String> FILES = new HashSet<>(Arrays.asList(
-            "index.html", "model.js", "ui.js", "style.css", "ZdCMark.png"));
     private WebView web;
     private String pendingExport;
 
     @Override @SuppressLint("SetJavaScriptEnabled")
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        Set<String> webFiles = new HashSet<>(Arrays.asList(getString(R.string.web_asset_names).split("\n")));
         if (state != null) pendingExport = state.getString("pendingExport");
         web = new WebView(this);
         if (Build.VERSION.SDK_INT >= 35) {
@@ -66,7 +65,7 @@ public final class MainActivity extends Activity {
                 String url = request.getUrl().toString();
                 if (request.getMethod().equals("GET") && url.startsWith(BASE)) {
                     String file = url.substring(BASE.length());
-                    if (FILES.contains(file)) {
+                    if (webFiles.contains(file)) {
                         try {
                             InputStream input = getAssets().open(file);
                             if (file.endsWith(".png")) return new WebResourceResponse("image/png", null, input);
@@ -91,10 +90,12 @@ public final class MainActivity extends Activity {
         @JavascriptInterface public void postMessage(String message) {
             runOnUiThread(() -> {
                 if (isDestroyed() || isFinishing()) return;
+                String action = null;
                 try {
                     JSONObject request = new JSONObject(message);
                     String value = request.optString("value", "");
-                    switch (request.getString("action")) {
+                    action = request.getString("action");
+                    switch (action) {
                         case "ready":
                             emit("open", "android", getPreferences(Context.MODE_PRIVATE).getString("list", null));
                             break;
@@ -118,7 +119,8 @@ public final class MainActivity extends Activity {
                             emit("notice", "未知操作。");
                     }
                 } catch (JSONException | RuntimeException error) {
-                    emit("notice", "操作未完成：" + error.getLocalizedMessage());
+                    if ("save".equals(action)) emit("saved", false);
+                    else emit("notice", "操作未完成：" + error.getLocalizedMessage());
                 }
             });
         }

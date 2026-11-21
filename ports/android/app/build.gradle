@@ -4,9 +4,16 @@ plugins {
 
 def uiDir = layout.buildDirectory.dir('generated/zdcUi')
 def iconDir = layout.buildDirectory.dir('generated/zdcResources')
+def webManifest = file('../../shared/web-assets.list')
+def webFiles = webManifest.readLines('UTF-8').collect { rootProject.file('../../' + it) }
 def ui = tasks.register('prepareZdCUi', Sync) {
-    from('../../shared') { include 'index.html', 'style.css', 'ui.js', 'model.js' }
-    from('../../../src/ZdC.App/Assets') { include 'ZdCMark.png' }
+    from(webFiles)
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    doFirst {
+        webFiles.each { source ->
+            if (!source.isFile()) throw new GradleException("Missing web asset: ${source}")
+        }
+    }
     into uiDir
 }
 def icon = tasks.register('prepareZdCIcon', Sync) {
@@ -24,6 +31,7 @@ android {
         targetSdk 35
         versionCode 1
         versionName '0.1.0-preview1'
+        resValue 'string', 'web_asset_names', webFiles.collect { it.name }.join('\\n')
     }
     sourceSets.main.assets.srcDir(uiDir)
     sourceSets.main.res.srcDir(iconDir)
