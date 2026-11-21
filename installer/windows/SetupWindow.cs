@@ -146,10 +146,13 @@ partial class SetupWindow : Window
     {
         folder.IsReadOnly=updating || !enabled;browseButton.IsEnabled=enabled && !updating;desktop.IsEnabled=enabled;
     }
-    private bool RefreshRegistration()
+    private bool RefreshRegistration(Action retry)
     {
         try {
-            existing=InstallEngine.Find();updating=existing!=null;
+            var registered=InstallEngine.Find();
+            // An interrupted upgrade can temporarily lose its MSI registration. Keep the update pending.
+            if(existing!=null && registered==null){Editable(false);Fault(1638,retry);return false;}
+            existing=registered;updating=existing!=null;
             if(updating && Version.Parse(existing.Version)>Version.Parse(Identity.Version)){Editable(false);Fault(1638,LoadOptions);return false;}
             if(updating) folder.Text=existing.Directory.TrimEnd('\\');
             Editable(true);return true;
@@ -157,7 +160,7 @@ partial class SetupWindow : Window
     }
     private void LoadOptions()
     {
-        if(!RefreshRegistration())return;
+        if(!RefreshRegistration(LoadOptions))return;
         status.Text="";progress.Visibility=Visibility.Hidden;
         Buttons(ActionButton("安装",Begin,true),ActionButton("取消",Close));
     }
@@ -187,7 +190,7 @@ partial class SetupWindow : Window
     }
     private async void Begin()
     {
-        if(busy || !RefreshRegistration())return;
+        if(busy || !RefreshRegistration(Begin))return;
         string path;
         try {
             if(InstallEngine.AppRunning()){Problem("请先退出 ZdC，再继续。");return;}
