@@ -13,7 +13,7 @@ internal sealed class ApplicationConnectionObserver : IDisposable
     private readonly HashSet<(int Pid, uint Local, uint LocalPort, uint Remote, uint RemotePort)> _established = new();
 
     public bool MatchesConnection(int pid, uint local, uint localPort, uint remote, uint remotePort) =>
-        OwnsProcess(pid) && _established.Contains((pid, local, localPort, remote, remotePort));
+        _available && OwnsProcess(pid) && _established.Contains((pid, local, localPort, remote, remotePort));
     private static uint HostPort(uint value) => ((value & 255) << 8) | ((value >> 8) & 255);
     private bool _identityUnavailable;
     private long _lastMembershipSample;
