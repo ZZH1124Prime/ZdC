@@ -148,11 +148,17 @@ internal static class InstallEngine
         if (input.Substring(3).Split('\\').Any(part => part == "." || part == ".." || part.EndsWith(".",StringComparison.Ordinal) || part.EndsWith(" ",StringComparison.Ordinal)))
             throw new ArgumentException();
         string path = Path.GetFullPath(input).TrimEnd('\\');
-        if (path.Length <= 3 || File.Exists(path)) throw new ArgumentException();
+        if (path.Length <= 3) throw new ArgumentException();
         var drive = new DriveInfo(Path.GetPathRoot(path));
         if (!drive.IsReady || drive.DriveType != DriveType.Fixed) throw new ArgumentException();
         for (var d = new DirectoryInfo(path); d != null; d = d.Parent)
-            if (d.Exists && (d.Attributes & FileAttributes.ReparsePoint) != 0) throw new ArgumentException();
+        {
+            if (d.Exists)
+            {
+                if ((d.Attributes & FileAttributes.ReparsePoint) != 0) throw new ArgumentException();
+            }
+            else if (File.Exists(d.FullName)) throw new ArgumentException();
+        }
         if (existing == null && Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any()) throw new ArgumentException();
         if (existing != null && !String.Equals(path,Path.GetFullPath(existing.Directory).TrimEnd('\\'),StringComparison.OrdinalIgnoreCase)) throw new ArgumentException();
         if (drive.AvailableFreeSpace < Identity.Size) throw new Win32Exception(112);
