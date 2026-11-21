@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Insets;
@@ -39,6 +40,7 @@ import java.util.Set;
 
 public final class MainActivity extends Activity {
     private static final int CREATE_RULES = 21;
+    private static final String LIST_KEY = "list";
     private static final String BASE = "https://appassets.androidplatform.net/assets/";
     private WebView web;
     private String pendingExport;
@@ -97,14 +99,13 @@ public final class MainActivity extends Activity {
                     action = request.getString("action");
                     switch (action) {
                         case "ready":
-                            emit("open", "android", getPreferences(Context.MODE_PRIVATE).getString("list", null));
+                            emit("open", "android", getPreferences(Context.MODE_PRIVATE).getString(LIST_KEY, null));
                             break;
                         case "pick":
                             pick();
                             break;
                         case "save":
-                            boolean ok = getPreferences(Context.MODE_PRIVATE).edit().putString("list", value).commit();
-                            emit("saved", ok);
+                            emit("saved", saveList(getPreferences(Context.MODE_PRIVATE), value));
                             break;
                         case "launch":
                             launch(value);
@@ -123,6 +124,18 @@ public final class MainActivity extends Activity {
                     else emit("notice", "操作未完成：" + error.getLocalizedMessage());
                 }
             });
+        }
+    }
+
+    private static boolean saveList(SharedPreferences preferences, String value) {
+        String previous = preferences.getString(LIST_KEY, null);
+        boolean saved = false;
+        try {
+            saved = preferences.edit().putString(LIST_KEY, value).commit();
+            return saved;
+        } finally {
+            // A failed disk write can still publish the new value to readers in this process.
+            if (!saved) preferences.edit().putString(LIST_KEY, previous).commit();
         }
     }
 
@@ -147,7 +160,7 @@ public final class MainActivity extends Activity {
     }
 
     private void launch(String id) throws JSONException {
-        String raw = getPreferences(Context.MODE_PRIVATE).getString("list", null);
+        String raw = getPreferences(Context.MODE_PRIVATE).getString(LIST_KEY, null);
         if (raw != null) {
             JSONArray entries = new JSONObject(raw).getJSONArray("entries");
             for (int i = 0; i < entries.length(); i++) {
