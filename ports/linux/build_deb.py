@@ -3,13 +3,14 @@ import argparse
 import gzip
 import io
 from pathlib import Path, PurePosixPath
+import re
 import tarfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 VERSION = "0.1.0~preview1"
-CONTROL = f"""Package: zdc
-Version: {VERSION}
+CONTROL = """Package: zdc
+Version: {version}
 Architecture: all
 Maintainer: ZdC contributors <maintainers@zdc.invalid>
 Section: net
@@ -42,7 +43,9 @@ def tar_gz(files):
     return stream.getvalue()
 
 
-def build(destination):
+def build(destination, version=VERSION):
+    if not re.fullmatch(r"(?:[0-9]+:)?[0-9](?:[0-9A-Za-z.+~-]*[0-9A-Za-z.+~])?", version):
+        raise ValueError("Invalid Debian package version")
     manifest = HERE.parent / "shared" / "web-assets.list"
     files = [(HERE / "zdc.py", "usr/bin/zdc", 0o755),
              (HERE / "zdc.desktop", "usr/share/applications/zdc.desktop", 0o644),
@@ -62,7 +65,7 @@ def build(destination):
         contents.append((name, payload, mode))
     data = tar_gz(contents)
     members = [("debian-binary", b"2.0\n"),
-               ("control.tar.gz", tar_gz([("control", CONTROL.encode(), 0o644)])),
+               ("control.tar.gz", tar_gz([("control", CONTROL.format(version=version).encode(), 0o644)])),
                ("data.tar.gz", data)]
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as output:
@@ -77,5 +80,8 @@ def build(destination):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "artifacts" / f"zdc_{VERSION}_all.deb")
-    build(parser.parse_args().output)
+    parser.add_argument("--version", default=VERSION)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    file_version = args.version.rsplit(":", 1)[-1]
+    build(args.output or ROOT / "artifacts" / f"zdc_{file_version}_all.deb", args.version)
