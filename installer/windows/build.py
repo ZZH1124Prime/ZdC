@@ -99,6 +99,7 @@ def build(work, release, commit, version, files, filename):
     def rows(name, data):
         m.add_data(db, name, data)
     si = db.GetSummaryInformation(10)
+    package_code = si.GetProperty(m.PID_REVNUMBER).decode('ascii')
     si.SetProperty(m.PID_TEMPLATE, 'x64;1033')
     si.SetProperty(m.PID_PAGECOUNT, 500)
     si.Persist()
@@ -171,7 +172,7 @@ def build(work, release, commit, version, files, filename):
     (work/'Outline.cs').write_text(outline,encoding='utf-8-sig')
     identity = ('[assembly:System.Reflection.AssemblyVersion("'+version+'.0")]\n' +
                 '[assembly:System.Reflection.AssemblyFileVersion("'+version+'.0")]\n')
-    identity += 'internal static class Identity { internal const string Family="'+FAMILY+'", Product="'+product+'", Version="'+version+'", PackageSha="'+digest(msi.read_bytes())+'"; internal const long Size='+str(sum((payload/f['Name']).stat().st_size for f in files))+'L; }'
+    identity += 'internal static class Identity { internal const string Family="'+FAMILY+'", Product="'+product+'", PackageCode="'+package_code+'", Version="'+version+'", PackageSha="'+digest(msi.read_bytes())+'"; internal const long Size='+str(sum((payload/f['Name']).stat().st_size for f in files))+'L; }'
     (work/'Identity.cs').write_text(identity,encoding='ascii')
 
     exe = work / filename

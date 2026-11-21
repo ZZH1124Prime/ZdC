@@ -12,7 +12,7 @@ using Microsoft.Win32;
 
 internal sealed class Installed
 {
-    internal string Code, Directory, Version;
+    internal string Code, PackageCode, Directory, Version;
     internal bool Desktop;
 }
 
@@ -102,7 +102,7 @@ internal static class InstallEngine
         if (String.IsNullOrWhiteSpace(path)) throw new Win32Exception(1610);
         int desktop = MsiQueryFeatureStateW(product, "Desktop");
         if (desktop != 2 && desktop != 3 && desktop != 1) throw new Win32Exception(1610);
-        return new Installed { Code=product, Directory=path, Version=ReadInfo(product,"VersionString"), Desktop=desktop==3 };
+        return new Installed { Code=product, PackageCode=ReadInfo(product,"PackageCode"), Directory=path, Version=ReadInfo(product,"VersionString"), Desktop=desktop==3 };
     }
 
     internal static bool AppRunning()
@@ -165,12 +165,24 @@ internal static class InstallEngine
         return path;
     }
 
+    /// <summary>Recaches a changed MSI for a same-product update while preserving the selected Desktop feature.</summary>
+    private static string InstallProperties(Installed current, string path, bool desktop)
+    {
+        string properties = "REBOOT=ReallySuppress INSTALLDIR=\"" + path + "\" ADDLOCAL=" + (desktop ? "Main,Desktop" : "Main");
+        if (current == null || !String.Equals(current.Code, Identity.Product, StringComparison.OrdinalIgnoreCase)) return properties;
+        bool samePackage = String.Equals(current.PackageCode, Identity.PackageCode, StringComparison.OrdinalIgnoreCase);
+        properties += samePackage ? " REINSTALL=Main REINSTALLMODE=amus" : " REINSTALL=Main REINSTALLMODE=vamus";
+        if (!desktop && current.Desktop) properties += " REMOVE=Desktop";
+        return properties;
+    }
+
     /// <summary>Installs the pinned embedded database through Windows Installer. The native engine owns elevation and rollback.</summary>
     internal static uint Apply(Installed existing, string path, bool desktop, IntPtr owner, IProgress<int> progress, CancellationToken cancellation)
     {
         if(cancellation.IsCancellationRequested) return 1602;
         var now = Find();
         if ((existing == null) != (now == null) || (now != null && (!String.Equals(existing.Code,now.Code,StringComparison.OrdinalIgnoreCase) ||
+            !String.Equals(existing.PackageCode,now.PackageCode,StringComparison.OrdinalIgnoreCase) ||
             !String.Equals(existing.Directory,now.Directory,StringComparison.OrdinalIgnoreCase)))) return 1638;
         if (now != null && Version.Parse(now.Version) > Version.Parse(Identity.Version)) return 1638;
         path = CheckDirectory(path,now);
@@ -186,12 +198,7 @@ internal static class InstallEngine
             using (var hash = SHA256.Create())
             {
                 if (!String.Equals(BitConverter.ToString(hash.ComputeHash(guard)).Replace("-",""),Identity.PackageSha,StringComparison.Ordinal)) return 1620;
-                string properties = "REBOOT=ReallySuppress INSTALLDIR=\"" + path + "\" ADDLOCAL=" + (desktop ? "Main,Desktop" : "Main");
-                if (now != null && String.Equals(now.Code,Identity.Product,StringComparison.OrdinalIgnoreCase))
-                {
-                    properties += " REINSTALL=Main REINSTALLMODE=amus";
-                    if (!desktop && now.Desktop) properties += " REMOVE=Desktop";
-                }
+                string properties = InstallProperties(now, path, desktop);
                 var previousOwner=owner;
                 var previousLevel=MsiSetInternalUI(2u | 0x200u, ref previousOwner);
                 var meter=new Meter(progress,cancellation);
