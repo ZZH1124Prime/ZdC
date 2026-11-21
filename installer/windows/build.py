@@ -49,6 +49,34 @@ def compiler():
     raise RuntimeError(f'Cannot locate the selected .NET SDK {version}')
 
 
+def verify_payload_identity(payload, version, commit):
+    """Compare the application release identity with the MSI identity before creating the database."""
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    command = (
+        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
+        "$rows = foreach ($name in 'ZdC.exe','ZdC.dll') { "
+        "$v=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $PWD $name)); "
+        "[pscustomobject]@{Name=$name; Numeric=@($v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart); "
+        "Product=$v.ProductVersion} }; ConvertTo-Json -Compress -InputObject @($rows)"
+    )
+    rows = json.loads(subprocess.check_output(
+        [str(powershell), '-NoProfile', '-NonInteractive', '-Command', command], cwd=payload, encoding='utf-8'))
+    expected = tuple(map(int, version.split('.')))
+    for row in rows:
+        product, _, metadata = (row['Product'] or '').partition('+')
+        if tuple(row['Numeric']) != expected or product not in (version, version + '.0'):
+            raise ValueError(f"{row['Name']} product version {row['Product']!r} differs from MSI version {version}")
+        stamps = re.findall(r'(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])', metadata.lower())
+        if any(stamp != commit for stamp in stamps):
+            raise ValueError(f"{row['Name']} source revision differs from manifest {commit}")
+
+    deps = json.loads((payload / 'ZdC.deps.json').read_text(encoding='utf-8-sig'))
+    target = deps['targets'][deps['runtimeTarget']['name']]
+    app = f'ZdC/{version}'
+    if app not in target or deps['libraries'].get(app, {}).get('type') != 'project':
+        raise ValueError(f'ZdC.deps.json does not declare application version {version}')
+
+
 def build(work, release, commit, version, files, filename):
     payload = work / 'verified'
     payload.mkdir()
@@ -64,6 +92,7 @@ def build(work, release, commit, version, files, filename):
             raise ValueError(f'Unverified release input: {name}')
         (payload / name).write_bytes(raw)
 
+    verify_payload_identity(payload, version, commit)
     msi = work / 'ZdC.msi'
     product = guid('product:x64:' + version)
     db = m.init_database(str(msi), schema, 'ZdC', product, version, 'ZdC')
