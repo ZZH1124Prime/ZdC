@@ -8,12 +8,17 @@ namespace ZdC.Core;
 public static class ApplicationEntryReader
 {
     public static Task<RegisteredApplication> ReadAsync(string sourcePath,
-        CancellationToken token = default)
+        CancellationToken token = default) => ReadOnStaAsync(() => Read(sourcePath), token);
+
+    internal static Task<string> ReadShortcutTargetAsync(string shortcut, CancellationToken token) =>
+        ReadOnStaAsync(() => ReadShortcut(shortcut, link => NormalizeTarget((string)link.TargetPath)), token);
+
+    private static Task<T> ReadOnStaAsync<T>(Func<T> read, CancellationToken token)
     {
-        var completion = new TaskCompletionSource<RegisteredApplication>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
-            try { token.ThrowIfCancellationRequested(); completion.SetResult(Read(sourcePath)); }
+            try { token.ThrowIfCancellationRequested(); completion.SetResult(read()); }
             catch (OperationCanceledException) { completion.SetCanceled(token); }
             catch (Exception ex) { completion.SetException(ex); }
         }) { IsBackground = true, Name = "ZdC entry reader" };
@@ -33,26 +38,13 @@ public static class ApplicationEntryReader
         var shortcut = extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase);
         if (shortcut)
         {
-            object? shell = null, link = null;
-            try
-            {
-                shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell", throwOnError: true)!)!;
-                link = ((dynamic)shell).CreateShortcut(source);
-                target = (string)((dynamic)link).TargetPath;
-                arguments = (string)((dynamic)link).Arguments;
-                directory = (string)((dynamic)link).WorkingDirectory;
-                icon = (string)((dynamic)link).IconLocation;
-                show = (int)((dynamic)link).WindowStyle;
-            }
-            finally
-            {
-                if (link is not null && Marshal.IsComObject(link)) Marshal.FinalReleaseComObject(link);
-                if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
-            }
+            (target, arguments, directory, icon, show) = ReadShortcut(source, link =>
+                ((string)link.TargetPath, (string)link.Arguments, (string)link.WorkingDirectory,
+                 (string)link.IconLocation, (int)link.WindowStyle));
         }
         else if (extension.Equals(".exe", StringComparison.OrdinalIgnoreCase)) target = source;
         else throw new ArgumentException("请拖入指向桌面应用的 .lnk 快捷方式或 .exe 文件。");
-        target = ApplicationRegistry.NormalizeExecutablePath(Environment.ExpandEnvironmentVariables(target));
+        target = NormalizeTarget(target);
         if (!File.Exists(target)) throw new FileNotFoundException("快捷方式目标已失效，请拖入新的入口。", target);
         var version = FileVersionInfo.GetVersionInfo(target);
         var iconPath = target;
@@ -76,6 +68,25 @@ public static class ApplicationEntryReader
             WorkingDirectory = Path.GetFullPath(workingDirectory), IconPath = iconPath, IconIndex = iconIndex,
             WindowStyle = show is 1 or 3 or 7 ? show : 1
         };
+    }
+
+    private static string NormalizeTarget(string target) =>
+        ApplicationRegistry.NormalizeExecutablePath(Environment.ExpandEnvironmentVariables(target));
+
+    private static T ReadShortcut<T>(string source, Func<dynamic, T> read)
+    {
+        object? shell = null, link = null;
+        try
+        {
+            shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell", throwOnError: true)!)!;
+            link = ((dynamic)shell).CreateShortcut(source);
+            return read(link);
+        }
+        finally
+        {
+            if (link is not null && Marshal.IsComObject(link)) Marshal.FinalReleaseComObject(link);
+            if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+        }
     }
 
     private static string[] SplitArguments(string arguments)

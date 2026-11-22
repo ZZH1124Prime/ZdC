@@ -63,13 +63,6 @@ public sealed class ApplicationRegistry
             _entries = candidate;
             _baselineHash = bytes is null ? null : SHA256.HashData(bytes);
             _loaded = true;
-            if (bytes is not null)
-            {
-                using var document = JsonDocument.Parse(bytes);
-                if (document.RootElement.EnumerateArray().Any(e => e.EnumerateObject().Any(
-                    p => p.Name.Equals("IncludeChildren", StringComparison.OrdinalIgnoreCase))))
-                    await SaveAsync(candidate, ct).ConfigureAwait(false);
-            }
             return Snapshot();
         }, cancellationToken);
 
@@ -185,8 +178,7 @@ public sealed class ApplicationRegistry
                 throw new InvalidDataException("入口参数无效。");
             if (entry.WorkingDirectory is not null && !System.IO.Path.IsPathFullyQualified(entry.WorkingDirectory))
                 throw new InvalidDataException("入口起始位置必须是完整路径。");
-            var properties = entry.AdditionalProperties?.Where(p => !p.Key.Equals("IncludeChildren", StringComparison.OrdinalIgnoreCase))
-                .ToDictionary(p => p.Key, p => p.Value.Clone(), StringComparer.Ordinal);
+            var properties = entry.AdditionalProperties?.ToDictionary(p => p.Key, p => p.Value.Clone(), StringComparer.Ordinal);
             normalized[i] = entry with { Path = path, Arguments = (string[])entry.Arguments.Clone(), AdditionalProperties = properties };
         }
         return normalized;

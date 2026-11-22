@@ -6,7 +6,7 @@
 
 ## 构建
 
-- **Linux 安装包**　在仓库根目录执行 `python3 ports/linux/build_deb.py`。产物为 `artifacts/zdc_0.1.0~preview1_all.deb`。Ubuntu 20.04 桌面可用 `sudo apt install ./artifacts/zdc_0.1.0~preview1_all.deb` 安装，从应用菜单打开 ZdC。卸载命令为 `sudo apt remove zdc`，名单保存在当前用户的 XDG 配置目录下。
+- **Linux 安装包**　在仓库根目录执行 `python3 ports/linux/build_deb.py`。产物为 `artifacts/ports/0.1.0-preview3/zdc_0.1.0~preview3_all.deb`。Ubuntu 20.04 桌面可用 `sudo apt install ./artifacts/ports/0.1.0-preview3/zdc_0.1.0~preview3_all.deb` 安装，从应用菜单打开 ZdC。卸载命令为 `sudo apt remove zdc`，名单保存在当前用户的 XDG 配置目录下。
 - **Android App**　用 Android Studio 打开 `ports/android`，或在该目录使用 JDK 17、Android SDK 35 和 Build Tools 35.0.0 执行 `./gradlew :app:assembleDebug`。Windows 可使用 `gradlew.bat`。最低系统版本为 Android 6.0，界面需要支持 ES2018 的系统 WebView。调试 APK 在 `app/build/outputs/apk/debug/`。
 - **回归测试**　在仓库根目录用 Node 18+ 执行 `node --test ports/tests/model.test.js`，用 `python3 ports/tests/test_deb.py` 检查 deb 安装目录及入口权限。在 `ports/android` 执行 `./gradlew :app:testDebugUnitTest` 可用 Robolectric 模拟 API 23 和 35，检查选择、启动、名单恢复以及系统文件选择器的保存和取消。
 

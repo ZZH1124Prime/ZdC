@@ -8,7 +8,7 @@ import tarfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-VERSION = "0.1.0~preview1"
+VERSION = "0.1.0~preview3"
 CONTROL = """Package: zdc
 Version: {version}
 Architecture: all
@@ -84,4 +84,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     file_version = args.version.rsplit(":", 1)[-1]
-    build(args.output or ROOT / "artifacts" / f"zdc_{file_version}_all.deb", args.version)
+    version_dir = file_version.replace("~", "-")
+    destination = ROOT / "artifacts" / "ports" / version_dir / f"zdc_{file_version}_all.deb"
+    build(args.output or destination, args.version)

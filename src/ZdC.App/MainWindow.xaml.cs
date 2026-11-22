@@ -261,7 +261,8 @@ public partial class MainWindow : Window
         var operationFailed = false;
         var attemptedLaunch = false;
         string? launchedPath = null;
-        var operationPath = row.Path;
+        var entry = row.Entry;
+        var operationPath = entry.Path;
         try
         {
             var state = await _applications.GetSessionStateAsync(row.Path);
@@ -276,14 +277,12 @@ public partial class MainWindow : Window
                 row.SetTelemetry(state);
                 return;
             }
-            var blockers = await _applications.GetBlockingProcessesAsync(row.Path);
-            if (blockers.Count != 0)
-            {
-                await ConfirmForceStopAsync(row.Path, blockers);
-                return;
-            }
-            attemptedLaunch = true;
             operationFailed = true;
+            var blockers = await _applications.GetBlockingProcessesAsync(entry);
+            // 残留进程弹出与右键完全相同的确认框；确认并等待全部退出后，本次点击直接续跑一次启动，
+            // 不重新检测，也不回到入口重复弹窗。取消或停止失败则结束本次操作。
+            if (blockers.Count != 0 && !await ConfirmForceStopAsync(entry, blockers)) return;
+            attemptedLaunch = true;
             launchedPath = (await _applications.LaunchAsync(row.Path, routingEnabled: true)).RegisteredPath;
             operationFailed = false;
             if (!string.Equals(launchedPath, row.Path, StringComparison.OrdinalIgnoreCase)) return;
@@ -381,27 +380,33 @@ public partial class MainWindow : Window
         if (_busy || !_loaded || _applicationOperations.Count > 0 ||
             AppList.SelectedItem is not ApplicationRow row) return;
         SetBusy(true);
+        row.ClearOperationFailure();
+        var entry = row.Entry;
         try
         {
-            var snapshot = await _applications.GetBlockingProcessesAsync(row.Path);
-            if (!await ConfirmForceStopAsync(row.Path, snapshot)) return;
-            await RefreshStatesAsync(force: true);
+            var snapshot = await _applications.GetBlockingProcessesAsync(entry);
+            await ConfirmForceStopAsync(entry, snapshot);
         }
         catch (Exception ex)
         {
+            row.FailOperation(ex.Message);
             PaperDialog.ShowMessage(this, "应用操作失败",
                 $"{row.Name}\n\n{ex.Message}\n\n其他应用继续运行。", isError: true);
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            await RefreshStatesAsync(force: true);
+        }
     }
-    private async Task<bool> ConfirmForceStopAsync(string path, IReadOnlyList<ApplicationBlockingProcess> snapshot)
+    private async Task<bool> ConfirmForceStopAsync(RegisteredApplication entry, IReadOnlyList<ApplicationBlockingProcess> snapshot)
     {
         // Both callers stop only the snapshot shown in this dialog.
         var list = string.Join("\n\n", snapshot.Select(process =>
             $"{process.Name} (PID {process.ProcessId})\n{process.ExecutablePath}"));
         if (!PaperDialog.Confirm(this,
             $"当前阻塞应用开启的进程：\n{list}\n\n是否全部停止", snapshot.Count > 0)) return false;
-        await _applications.ForceStopBlockingProcessesAsync(path, snapshot);
+        await _applications.ForceStopBlockingProcessesAsync(entry, snapshot);
         return true;
     }
 
@@ -521,18 +526,25 @@ public sealed class ApplicationRow(RegisteredApplication entry, ImageSource? ico
     private string? _operationFailure;
     private bool _recoverOnObservation;
     public bool HasOperationFailure => _operationFailure is not null;
+    public string? OperationError => _recoverOnObservation ? null : _operationFailure;
     public Visibility ProgressVisibility => _operating || _connecting || _completing ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility TelemetryVisibility => ProgressVisibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility TelemetryVisibility => OperationError is null && ProgressVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
     private void NotifyProgress()
     {
         PropertyChanged?.Invoke(this, new(nameof(IsProgressCompleting)));
         PropertyChanged?.Invoke(this, new(nameof(ProgressVisibility)));
         PropertyChanged?.Invoke(this, new(nameof(TelemetryVisibility)));
     }
-    public void BeginOperation()
+    public void ClearOperationFailure()
     {
         _operationFailure = null;
         _recoverOnObservation = false;
+        PropertyChanged?.Invoke(this, new(nameof(OperationError)));
+        PropertyChanged?.Invoke(this, new(nameof(TelemetryVisibility)));
+    }
+    public void BeginOperation()
+    {
+        ClearOperationFailure();
         _progressVersion++;
         _completing = false;
         _connectionCompleted = false;
@@ -552,6 +564,7 @@ public sealed class ApplicationRow(RegisteredApplication entry, ImageSource? ico
         Status = message;
         TelemetryText = "---ms";
         TelemetryBrush = (Brush)Application.Current.FindResource("Muted");
+        PropertyChanged?.Invoke(this, new(nameof(OperationError)));
         NotifyProgress();
         PropertyChanged?.Invoke(this, new(nameof(Status)));
         PropertyChanged?.Invoke(this, new(nameof(TelemetryText)));
@@ -560,6 +573,7 @@ public sealed class ApplicationRow(RegisteredApplication entry, ImageSource? ico
     // 连接观测来自核心采样；没有真实耗时样本时不显示毫秒数。
     public void SetTelemetry(ApplicationSessionState state)
     {
+        if (OperationError is not null) return;
         if (_recoverOnObservation && state.ConnectionStatus != ApplicationConnectionStatus.Unavailable) { _operationFailure = null; _recoverOnObservation = false; }
         if (_operationFailure is not null) { FailOperation(_operationFailure, _recoverOnObservation); return; }
         var observed = state.ConnectionStatus is ApplicationConnectionStatus.DirectObserved or ApplicationConnectionStatus.DefaultObserved;
@@ -625,6 +639,7 @@ public sealed class ApplicationRow(RegisteredApplication entry, ImageSource? ico
     {
         ActionHint = running ? (enabled ? "暂停此应用直连" : "开启此应用直连") : !exists ? "替换失效入口" : "启动应用";
         PropertyChanged?.Invoke(this, new(nameof(ActionHint)));
+        if (OperationError is not null) return;
         Status = !exists ? "入口失效 · 拖入替换" : running ? (enabled ? "直连已启用 · 等待连接观测" : "跟随系统") : "点击图标启动";
         StatusBrush = (Brush)Application.Current.FindResource(!exists ? "StatusWarning" : running && enabled ? "StatusSuccess" : "Muted");
         PropertyChanged?.Invoke(this, new(nameof(Status)));

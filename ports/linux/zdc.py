@@ -20,21 +20,16 @@ STATE = Path(GLib.get_user_config_dir()) / "zdc" / "applications.json"
 
 
 def atomic_write(destination, data):
-    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as tmp:
-        temporary_path = Path(tmp.name)
-        try:
+    tmp = tempfile.NamedTemporaryFile(dir=destination.parent, delete=False)
+    try:
+        with tmp:
             tmp.write(data.encode("utf-8"))
             tmp.flush()
             os.fsync(tmp.fileno())
-        except BaseException:
-            tmp.close()
-            temporary_path.unlink()
-            raise
-    try:
-        os.replace(temporary_path, destination)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
+        os.replace(tmp.name, destination)
+    except BaseException:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
 
 
 def executable(filename):
@@ -59,7 +54,7 @@ class ZdC(Gtk.Application):
             self.get_active_window().present()
             return
         window = Gtk.ApplicationWindow(application=self, title="ZdC")
-        window.set_default_size(680, 500)
+        window.set_default_size(560, 420)
         context = WebKit2.WebContext.new_ephemeral()
         context.register_uri_scheme("zdc", self.resource, None)
         context.get_security_manager().register_uri_scheme_as_secure("zdc")

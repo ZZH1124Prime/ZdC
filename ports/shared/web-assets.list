@@ -1,5 +1,6 @@
 src/ZdC.App/Assets/ZdCMark.png
 ports/shared/index.html
 ports/shared/style.css
+ports/shared/stone-grain.png
 ports/shared/model.js
 ports/shared/ui.js

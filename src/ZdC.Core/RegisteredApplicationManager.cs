@@ -22,6 +22,7 @@ public sealed record ApplicationSessionState(bool IsRunning, bool RoutingEnabled
 /// </summary>
 public sealed class RegisteredApplicationManager : IAsyncDisposable
 {
+    private const string InvalidEntryMessage = "入口已失效，请拖入新入口替换。";
     private readonly ApplicationRegistry _registry;
     private readonly string _controllerPath;
     private readonly BoundedLocalLog? _log;
@@ -273,38 +274,42 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
             ObservedConnectionCount = sample.Count, ObservedAt = sample.At
         };
     }
-    public async Task<IReadOnlyList<ApplicationBlockingProcess>> GetBlockingProcessesAsync(string registeredPath, CancellationToken token = default)
+    public async Task<IReadOnlyList<ApplicationBlockingProcess>> GetBlockingProcessesAsync(RegisteredApplication expectedEntry, CancellationToken token = default)
     {
-        var path = Path.GetFullPath(registeredPath);
+        var path = Path.GetFullPath(expectedEntry.Path);
         var operation = await EnterAsync(path, token).ConfigureAwait(false);
         try
         {
             EnsureReady();
-            if (!(await _registry.ListAsync(token).ConfigureAwait(false)).Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
-                throw new InvalidOperationException();
-            return await Task.Run<IReadOnlyList<ApplicationBlockingProcess>>(() =>
+            await RequireSameBlockingProcessEntryAsync(path, expectedEntry, token).ConfigureAwait(false);
+            var snapshot = await Task.Run<IReadOnlyList<ApplicationBlockingProcess>>(() =>
             {
                 var known = _sessions.TryGetValue(path, out var session)
                     ? ApplicationProcessControl.ListKnown(session.LiveMemberIdentities()) : [];
                 return ApplicationProcessControl.List(path).Concat(known).DistinctBy(x => (x.ProcessId, x.CreatedFileTimeUtc))
                     .OrderBy(x => x.ProcessId).ToArray();
             }, token).ConfigureAwait(false);
+            // With no process to stop, leave normal shortcut recovery to the launch path.
+            using var shortcut = snapshot.Count == 0 ? null
+                : await OpenMatchingShortcutAsync(expectedEntry, token).ConfigureAwait(false);
+            return snapshot;
         }
         finally { operation.Dispose(); }
     }
 
-    public async Task<IReadOnlyList<int>> ForceStopBlockingProcessesAsync(string registeredPath,
+    public async Task<IReadOnlyList<int>> ForceStopBlockingProcessesAsync(RegisteredApplication expectedEntry,
         IReadOnlyList<ApplicationBlockingProcess> confirmed, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(confirmed);
         var frozen = confirmed.ToArray();
-        var path = Path.GetFullPath(registeredPath);
+        var path = Path.GetFullPath(expectedEntry.Path);
         var operation = await EnterAsync(path, token).ConfigureAwait(false);
         try
         {
             EnsureReady();
-            if (!(await _registry.ListAsync(token).ConfigureAwait(false)).Any(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase)))
-                throw new InvalidOperationException();
+            await RequireSameBlockingProcessEntryAsync(path, expectedEntry, token).ConfigureAwait(false);
+            // Keep the checked .lnk read-only for the duration of the confirmed operation.
+            using var shortcut = await OpenMatchingShortcutAsync(expectedEntry, token).ConfigureAwait(false);
             return await Task.Run(() =>
             {
                 var known = _sessions.TryGetValue(path, out var session)
@@ -314,6 +319,35 @@ public sealed class RegisteredApplicationManager : IAsyncDisposable
             }, token).ConfigureAwait(false);
         }
         finally { operation.Dispose(); }
+    }
+
+    private async Task RequireSameBlockingProcessEntryAsync(string path, RegisteredApplication expectedEntry, CancellationToken token)
+    {
+        var entry = (await _registry.ListAsync(token).ConfigureAwait(false))
+            .FirstOrDefault(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
+        if (entry is null || !string.Equals(entry.ShortcutPath, expectedEntry.ShortcutPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(InvalidEntryMessage);
+    }
+
+    internal static async Task<FileStream?> OpenMatchingShortcutAsync(RegisteredApplication expectedEntry, CancellationToken token)
+    {
+        if (expectedEntry.ShortcutPath is not { } shortcut) return null;
+        FileStream? file = null;
+        try
+        {
+            file = File.OpenRead(shortcut);
+            var target = await ApplicationEntryReader.ReadShortcutTargetAsync(shortcut, token).ConfigureAwait(false);
+            if (!string.Equals(target, Path.GetFullPath(expectedEntry.Path), StringComparison.OrdinalIgnoreCase) || !File.Exists(target))
+                throw new InvalidOperationException(InvalidEntryMessage);
+            return file;
+        }
+        catch (Exception ex)
+        {
+            file?.Dispose();
+            if (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Runtime.InteropServices.COMException)
+                throw new InvalidOperationException(InvalidEntryMessage, ex);
+            throw;
+        }
     }
 
     private static bool HasApplicationProcesses(string path) => ApplicationProcessControl.List(path).Count != 0;

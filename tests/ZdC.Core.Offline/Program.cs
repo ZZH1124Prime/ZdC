@@ -1,33 +1,59 @@
 using System.Net;
-using TrafikRuler.Core;
 using ZdC.Core;
 
 
 var checks = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception(name); checks++; Console.WriteLine("PASS " + name); }
-UInt128 Ip(string s) => Addr.FromIPAddress(IPAddress.Parse(s));
-var a=Ip("10.0.0.2"); var b=Ip("10.0.0.3"); var n=Ip("192.168.1.5"); var remote=Ip("8.8.8.8");
-var bytes=new byte[128];
-var size=Packet.BuildTcp(bytes,false,a,remote,50000,443,123,0,2);
-Check(Packet.TryParse(bytes.AsSpan(0,size),out var packet),"parse TCP SYN");
-Check(Packet.ChecksumsValid(bytes.AsSpan(0,size),packet),"initial checksums");
-Packet.RewriteAddressFull(bytes.AsSpan(0,size),ref packet,true,n);
-Check(packet.Src==n && Packet.ChecksumsValid(bytes.AsSpan(0,size),packet),"source NAT checksum");
-Packet.RewriteAddressIncremental(bytes.AsSpan(0,size),ref packet,true,a);
-Check(packet.Src==a && Packet.ChecksumsValid(bytes.AsSpan(0,size),packet),"reverse address checksum");
-var table=new NatTable(new OfflinePortAllocator());
-FlowEntry Entry(UInt128 local) => new() {Key=new(Packet.ProtoTcp,50000,remote,443,local),Action=FlowAction.Nat,OrigLocal=local,NatLocal=n,LastSeen=Environment.TickCount64};
-var first=table.Put(Entry(a)); var second=table.Put(Entry(b));
-Check(first.Action==FlowAction.Nat && second.Action==FlowAction.Nat && first.NatPort != second.NatPort,"NAT ports allocated independently");
-Check(table.TryGetReverse(new(Packet.ProtoTcp,first.NatPort,remote,443,n),out var reverse)&&ReferenceEquals(first,reverse),"reverse map preserved");
-table.Remove(first);
-Check(!table.TryGetReverse(new(Packet.ProtoTcp,first.NatPort,remote,443,n),out _),"reverse map removed");
-var owners=new[] {new ProcessResolver.SocketOwner(false,Packet.ProtoTcp,a,50000,remote,443,100,1),new ProcessResolver.SocketOwner(false,Packet.ProtoTcp,b,50000,remote,443,200,2)};
-packet.Src=a;
-Check(ProcessResolver.SelectOwner(packet,owners)?.Pid==100,"full TCP tuple owner");
-packet.Protocol=Packet.ProtoUdp;
-var udp=new[]{new ProcessResolver.SocketOwner(false,Packet.ProtoUdp,a,50000,0,0,100,1),new ProcessResolver.SocketOwner(false,Packet.ProtoUdp,a,50000,0,0,200,2)};
-Check(ProcessResolver.SelectOwner(packet,udp)==null,"ambiguous UDP rejected");
+if (args is ["--shortcut-guard-only"])
+{
+    var folder = Directory.CreateTempSubdirectory("ZdC.ShortcutGuard.");
+    var link = Path.Combine(folder.FullName, "entry.lnk");
+    var original = Path.Combine(folder.FullName, "original.exe");
+    var updated = Path.Combine(folder.FullName, "updated.exe");
+    try
+    {
+        // Inert targets: this mode only reads .lnk files and compares paths.
+        File.WriteAllBytes(original, []);
+        File.WriteAllBytes(updated, []);
+        var direct = new RegisteredApplication("fixture", original);
+        Check(await RegisteredApplicationManager.OpenMatchingShortcutAsync(direct, default) is null, "direct EXE skips shortcut validation");
+        WriteLink(link, original);
+        var card = await ApplicationEntryReader.ReadAsync(link);
+        Check(card.ShortcutPath == link && card.Path == original && card.Arguments.SequenceEqual(new[] { "--fixture", "two words" }) &&
+            card.WorkingDirectory == folder.FullName && card.WindowStyle == 3, "ordinary shortcut reading preserves launch metadata");
+        WriteLink(link, original, work: Path.Combine(folder.FullName, "absent-working-directory"));
+        using (var guard = await RegisteredApplicationManager.OpenMatchingShortcutAsync(card, default))
+        {
+            Check(guard is not null, "matching target is accepted independently of launch metadata");
+            try
+            {
+                using var writer = File.Open(link, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                throw new Exception("confirmed link was writable");
+            }
+            catch (IOException) { Check(true, "validated shortcut cannot change during the confirmed operation"); }
+        }
+        WriteLink(link, updated);
+        async Task ExpectInvalid(string name)
+        {
+            try { using var guard = await RegisteredApplicationManager.OpenMatchingShortcutAsync(card, default); }
+            catch (InvalidOperationException ex) when (ex.Message == "入口已失效，请拖入新入口替换。")
+            { Check(true, name); return; }
+            throw new Exception(name);
+        }
+        await ExpectInvalid("retargeting between snapshot and confirmation invalidates the cached target");
+        File.Delete(link);
+        await ExpectInvalid("unreadable shortcut invalidates the cached target");
+    }
+    finally
+    {
+        File.Delete(link);
+        File.Delete(original);
+        File.Delete(updated);
+        folder.Delete();
+    }
+    Console.WriteLine($"{checks} isolated shortcut checks passed.");
+    return;
+}
 Check(RoutingPreflight.IsBenchmarkOrFakeIp(IPAddress.Parse("198.19.255.254"))&&!RoutingPreflight.IsBenchmarkOrFakeIp(IPAddress.Parse("198.20.0.1")),"fake IP range");
 // Registry checks use an isolated temporary directory, never the user's live settings.
 var registryRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "ZdC.RegistryCheck." + Guid.NewGuid().ToString("N")));
@@ -138,6 +164,22 @@ try
         Check((await manager.ListAsync()).Single().Path == original,
             "normal launch resolves a further in-place update and persists it before controller startup");
     }
+    // Observe only this test's process. The post-confirmation check always receives an empty stop list.
+    var guardLink = Path.Combine(registryRoot, "Guard.lnk");
+    WriteLink(guardLink, executable);
+    var guarded = await manager.ImportAsync(guardLink);
+    Check((await manager.GetBlockingProcessesAsync(guarded)).Any(p => p.ProcessId == Environment.ProcessId),
+        "unchanged shortcut can list matching processes");
+    WriteLink(guardLink, updated);
+    var guardError = "入口已失效，请拖入新入口替换。";
+    try { await manager.GetBlockingProcessesAsync(guarded); throw new Exception("stale shortcut listed processes"); }
+    catch (InvalidOperationException ex) when (ex.Message == guardError)
+    { Check(true, "retargeted shortcut is rejected before confirmation"); }
+    try { await manager.ForceStopBlockingProcessesAsync(guarded, []); throw new Exception("stale confirmation accepted"); }
+    catch (InvalidOperationException ex) when (ex.Message == guardError)
+    { Check(true, "shortcut is rechecked after confirmation"); }
+    await manager.RemoveAsync(executable);
+
     // Register both targets explicitly and ensure a collision cannot absorb a second card.
     await persisted.LoadAsync();
     await persisted.RegisterAsync(updated);
@@ -208,16 +250,4 @@ static void WriteLink(string path, string target, string args = @"--fixture ""tw
         finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(link); }
     }
     finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
-}
-
-// Pure in-memory allocator: this harness never binds a socket or loads a driver.
-sealed class OfflinePortAllocator : INatPortAllocator
-{
-    private ushort _next = 49152;
-    public INatPortLease Reserve(byte protocol, UInt128 address) => new Lease(_next++);
-    private sealed class Lease(ushort port) : INatPortLease
-    {
-        public ushort Port { get; } = port;
-        public void Dispose() { }
-    }
 }

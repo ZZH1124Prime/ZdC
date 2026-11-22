@@ -1,21 +1,125 @@
 * { box-sizing: border-box; }
-body { margin: 0; background: #f5f2eb; color: #29292d; font: 16px/1.5 system-ui, sans-serif; }
-main { max-width: 48rem; margin: 0 auto; padding: clamp(1rem, 5vw, 2.5rem); }
-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.4rem; }
-header img { width: 6.7rem; height: 4.8rem; object-fit: contain; }
-h1 { margin: 0; font: 600 1.6rem/1.3 Georgia, serif; }
-header p { margin: .25rem 0 0; color: #5d5d58; }
+
+html, body { margin: 0; min-height: 100%; }
+body {
+    color: #29292d;
+    background: #dedcd8;
+    font: 14px/1.45 "Palatino Linotype", "KaiTi", "Kaiti SC", "STKaiti", "AR PL UKai CN", "Noto Serif CJK SC", serif;
+}
+
+main {
+    /* The rim follows the scalable points of MainWindow.StoneFace_SizeChanged. */
+    --rim: polygon(4px 7px, 13% 2px, 34% 8px, 39% 5px, 72% 1px, 91% 4px,
+        calc(100% - 7px) 2px, calc(100% - 1px) 11px, calc(100% - 5px) 22%,
+        calc(100% - 11px) 37%, calc(100% - 7px) 40.5%, calc(100% - 3px) 67%,
+        calc(100% - 6px) 87%, calc(100% - 2px) calc(100% - 13px),
+        calc(100% - 12px) calc(100% - 2px), 81% calc(100% - 5px),
+        64% calc(100% - 11px), 59% calc(100% - 7px), 31% calc(100% - 3px),
+        17% calc(100% - 6px), 9px calc(100% - 1px), 2px calc(100% - 11px),
+        6px 76%, 12px 63%, 8px 58%, 2px 29%, 4px 14%);
+    position: relative;
+    isolation: isolate;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    padding: 8px 22px 24px;
+}
+main::before, main::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    -webkit-clip-path: var(--rim);
+    clip-path: var(--rim);
+}
+main::before {
+    z-index: -2;
+    top: 5px; right: 0; bottom: 0; left: 4px;
+    background: linear-gradient(135deg, #c9c3b9, #b8b1a5 38%, #c6bfb2 64%, #a49b8d);
+}
+main::after {
+    z-index: -1;
+    top: 0; right: 4px; bottom: 5px; left: 0;
+    background: linear-gradient(rgba(245,244,242,.70), rgba(245,244,242,.70)),
+                #f5f4f2 url("stone-grain.png") 0 0 / 110px 110px repeat;
+}
+
+header { display: flex; flex-wrap: wrap; align-items: center; min-height: 88px; }
+header img { width: 114px; height: 76px; object-fit: contain; }
+header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+header p, .identity small { color: #66636a; }
+header p { margin: 0; }
+.actions { display: flex; flex-wrap: wrap; margin-left: auto; }
 button, summary { font: inherit; cursor: pointer; }
-button { border: 1px solid #a6a298; border-radius: .4rem; background: #faf8f3; color: #263a42; padding: .5rem .8rem; min-height: 44px; }
-button:focus-visible, summary:focus-visible { outline: 3px solid #285a79; outline-offset: 2px; }
-button:disabled { opacity: .55; cursor: default; }
-#pick { color: #fff; background: #324c5c; border-color: #324c5c; }
-.actions, .row-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
-#feedback { margin: .65rem 0; color: #374d53; }
+button {
+    min-height: 44px;
+    padding: 4px 10px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-shadow: 0 1px 0 #fcfaf6;
+}
+/* Raised ink on the existing add and launch controls follows the Windows glyphs. */
+#pick::before, .row-actions button:first-child::before {
+    content: "";
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -.12em;
+    margin-right: .3em;
+    background: linear-gradient(#30292a, #7a706b 48%, #423a37);
+}
+#pick::before {
+    -webkit-clip-path: polygon(37% 7%, 59% 4%, 59% 37%, 89% 37%, 93% 59%, 59% 59%, 59% 93%, 37% 96%, 37% 59%, 7% 59%, 4% 37%, 37% 37%);
+    clip-path: polygon(37% 7%, 59% 4%, 59% 37%, 89% 37%, 93% 59%, 59% 59%, 59% 93%, 37% 96%, 37% 59%, 7% 59%, 4% 37%, 37% 37%);
+}
+.row-actions button:first-child::before {
+    -webkit-clip-path: polygon(12% 4%, 96% 50%, 12% 96%);
+    clip-path: polygon(12% 4%, 96% 50%, 12% 96%);
+}
+.actions button + button { border-left: 1px solid #c8c3bc; box-shadow: inset 1px 0 #fcfaf6; }
+button:hover, summary:hover { background-color: #ece9e5; }
+button:active { background-color: #eee8e5; }
+button:disabled { opacity: .35; cursor: default; }
+button:focus, summary:focus { outline: 1px dotted #82766e; outline-offset: -2px; }
+
+#feedback, #empty { margin: 8px 0; overflow-wrap: break-word; }
 #feedback:empty { display: none; }
-ul { padding: 0; list-style: none; }
-li { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .8rem 0; border-top: 1px solid #c9c5bc; }
-.identity { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
-.identity small { display: block; color: #565a58; }
-details { margin-top: 1.6rem; border-top: 1px solid #c9c5bc; padding-top: .9rem; }
-summary { color: #324c5c; }
+#feedback[data-result="error"] { color: #9a5019; }
+#empty { color: #66636a; }
+#entries {
+    display: flex;
+    flex: 1 0 auto;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    padding: 0;
+    margin: 8px 0;
+    list-style: none;
+}
+#entries li {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    width: 168px;
+    max-width: 100%;
+    min-height: 140px;
+    margin: 0 4px 4px 0;
+    padding: 8px;
+    text-align: center;
+}
+#entries li:focus-within { box-shadow: inset 0 -1px #c5aaa5; }
+.identity { width: 100%; overflow-wrap: break-word; word-break: break-word; }
+.identity strong { font-weight: 600; }
+.identity small { display: block; font-size: 12px; }
+.row-actions { display: flex; flex-wrap: wrap; justify-content: center; }
+details { padding: 8px 0 0; border-top: 1px solid #dedcd8; }
+details p { max-width: 68ch; margin: 8px 0; }
+summary { padding: 8px 0; color: #423a37; }
+@media (pointer: fine) { button { min-height: 36px; } }
+@media (max-width: 450px) {
+    main { padding: 10px 17px 22px; }
+    header { align-content: center; }
+    .actions { width: 100%; margin: 0; }
+    #entries li { width: calc(50% - 4px); }
+}
+@media (max-width: 300px) { #entries li { width: 100%; } }

@@ -3,9 +3,11 @@ package org.zdc.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.UriPermission;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Insets;
@@ -24,6 +26,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -41,6 +44,7 @@ import java.util.Set;
 public final class MainActivity extends Activity {
     private static final int CREATE_RULES = 21;
     private static final String LIST_KEY = "list";
+    private static final String PICK_EXPORT_KEY = "pickExportDocument";
     private static final String BASE = "https://appassets.androidplatform.net/assets/";
     private WebView web;
     private String pendingExport;
@@ -111,10 +115,8 @@ public final class MainActivity extends Activity {
                             launch(value);
                             break;
                         case "export":
-                            Intent create = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                                    .setType("application/yaml").putExtra(Intent.EXTRA_TITLE, "zdc-rules.yaml");
-                            pendingExport = value;
-                            startActivityForResult(create, CREATE_RULES);
+                        case "exportAs":
+                            exportRules(value, "exportAs".equals(action));
                             break;
                         default:
                             emit("notice", "未知操作。");
@@ -186,6 +188,36 @@ public final class MainActivity extends Activity {
         out.putString("pendingExport", pendingExport);
     }
 
+    private List<Uri> persistedExportTargets() {
+        List<Uri> targets = new ArrayList<>();
+        for (UriPermission grant : getContentResolver().getPersistedUriPermissions()) {
+            if (grant.isWritePermission()) targets.add(grant.getUri());
+        }
+        return targets;
+    }
+
+    private void exportRules(String payload, boolean chooseFile) {
+        if (pendingExport != null) return;
+        if (!chooseFile && !getPreferences(Context.MODE_PRIVATE).getBoolean(PICK_EXPORT_KEY, false)) {
+            List<Uri> targets = persistedExportTargets();
+            if (targets.size() == 1) {
+                try {
+                    writeExport(targets.get(0), payload);
+                    return;
+                } catch (FileNotFoundException | SecurityException expired) {
+                    // A provider may remove the document or withdraw access between exports.
+                } catch (IOException | RuntimeException error) {
+                    showExportError(error);
+                    return;
+                }
+            }
+        }
+        Intent picker = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("application/yaml").putExtra(Intent.EXTRA_TITLE, "zdc-rules.yaml");
+        startActivityForResult(picker, CREATE_RULES);
+        pendingExport = payload;
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request != CREATE_RULES) return;
@@ -193,14 +225,56 @@ public final class MainActivity extends Activity {
         pendingExport = null;
         if (result != RESULT_OK || data == null || data.getData() == null || payload == null) return;
         Uri uri = data.getData();
+        if (!ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) return;
+        ContentResolver resolver = getContentResolver();
+        SharedPreferences preferences = getPreferences(Context.MODE_PRIVATE);
+        boolean alreadyPicking = preferences.getBoolean(PICK_EXPORT_KEY, false);
+        List<Uri> selectedOnly = Collections.singletonList(uri);
+        List<Uri> previousTargets = persistedExportTargets();
+        boolean suspendPrevious = !alreadyPicking && !previousTargets.isEmpty()
+                && !previousTargets.equals(selectedOnly);
+        // Persist the guard before writing another document, including across process death.
+        if (suspendPrevious && !preferences.edit().putBoolean(PICK_EXPORT_KEY, true).commit()) {
+            showExportError(new IOException(android.system.Os.strerror(android.system.OsConstants.EIO)));
+            return;
+        }
+        try {
+            writeExport(uri, payload);
+        } catch (IOException | RuntimeException error) {
+            if (suspendPrevious) preferences.edit().remove(PICK_EXPORT_KEY).apply();
+            showExportError(error);
+            return;
+        }
+        int write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        int required = write | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
+        if ((data.getFlags() & required) == required) {
+            try {
+                resolver.takePersistableUriPermission(uri, write);
+            } catch (SecurityException ignored) { /* The provider may allow just this export. */ }
+        }
+        List<Uri> targets = persistedExportTargets();
+        if (!targets.contains(uri)) return;
+        for (Uri other : targets) {
+            if (uri.equals(other)) continue;
+            try {
+                resolver.releasePersistableUriPermission(other, write);
+            } catch (SecurityException ignored) { /* The grant may already have been revoked. */ }
+        }
+        if ((suspendPrevious || alreadyPicking) && persistedExportTargets().equals(selectedOnly)) {
+            preferences.edit().remove(PICK_EXPORT_KEY).apply();
+        }
+    }
+
+    private void writeExport(Uri uri, String payload) throws IOException {
         try (OutputStream stream = getContentResolver().openOutputStream(uri, "wt")) {
             if (stream == null) throw new IOException("无法打开文件");
             stream.write(payload.getBytes(StandardCharsets.UTF_8));
-        } catch (IOException | RuntimeException error) {
-            new AlertDialog.Builder(this).setMessage("写入失败：" + error.getLocalizedMessage()).setPositiveButton("确定", null).show();
-            return;
         }
         android.widget.Toast.makeText(this, "规则集已写入，请在客户端导入或重载。", android.widget.Toast.LENGTH_LONG).show();
+    }
+
+    private void showExportError(Exception error) {
+        new AlertDialog.Builder(this).setMessage("写入失败：" + error.getLocalizedMessage()).setPositiveButton("确定", null).show();
     }
 
     @Override protected void onDestroy() {

@@ -6,7 +6,7 @@ def uiDir = layout.buildDirectory.dir('generated/zdcUi')
 def iconDir = layout.buildDirectory.dir('generated/zdcResources')
 def webManifest = file('../../shared/web-assets.list')
 def webFiles = webManifest.readLines('UTF-8').collect { rootProject.file('../../' + it) }
-def appVersionCode = providers.gradleProperty('zdcVersionCode').orElse('1').get().toInteger()
+def appVersionCode = providers.gradleProperty('zdcVersionCode').orElse('3').get().toInteger()
 if (appVersionCode < 1 || appVersionCode > 2100000000) {
     throw new GradleException('zdcVersionCode must be between 1 and 2100000000')
 }
@@ -34,7 +34,7 @@ android {
         minSdk 23
         targetSdk 35
         versionCode appVersionCode
-        versionName providers.gradleProperty('zdcVersionName').orElse('0.1.0-preview1').get()
+        versionName providers.gradleProperty('zdcVersionName').orElse('0.1.0-preview3').get()
         resValue 'string', 'web_asset_names', webFiles.collect { it.name }.join('\\n')
     }
     sourceSets.main.assets.srcDir(uiDir)

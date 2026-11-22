@@ -12,12 +12,17 @@
         else throw Error("平台适配器未连接。");
     }
 
-    function notice(message) { element("feedback").textContent = message; }
+    function notice(message, result = "") {
+        const feedback = element("feedback");
+        feedback.dataset.result = result;
+        feedback.textContent = message;
+    }
 
     function render() {
         const list = element("entries");
         list.textContent = "";
         const disabled = !state || pending !== null;
+        list.setAttribute("aria-busy", String(pending !== null));
         element("pick").disabled = element("export").disabled = disabled;
         element("empty").hidden = !state || state.entries.length !== 0;
         if (!state) return;
@@ -54,7 +59,7 @@
         pending = next;
         render();
         try { send("save", JSON.stringify(next)); }
-        catch (error) { pending = null; render(); notice(error.message); }
+        catch (error) { pending = null; render(); notice(error.message, "error"); }
     }
 
     window.ZdC = {
@@ -73,11 +78,16 @@
             if (ok) state = pending;
             pending = null;
             render();
-            notice(ok ? "名单已保存，更新规则集后请重载客户端。" : "名单保存失败，请检查存储空间和权限。");
+            notice(ok ? "名单已保存，更新规则集后请重载客户端。" : "名单保存失败，请检查存储空间和权限。", ok ? "" : "error");
         },
         notice
     };
     element("pick").onclick = () => send("pick");
     element("export").onclick = () => send("export", ZdCModel.provider(state));
+    element("export").oncontextmenu = event => {
+        if (!state || state.platform !== "android" || pending !== null) return;
+        event.preventDefault();
+        send("exportAs", ZdCModel.provider(state));
+    };
     try { send("ready"); } catch (error) { notice(error.message); }
 })();
