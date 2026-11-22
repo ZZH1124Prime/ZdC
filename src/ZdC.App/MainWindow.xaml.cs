@@ -276,6 +276,12 @@ public partial class MainWindow : Window
                 row.SetTelemetry(state);
                 return;
             }
+            var blockers = await _applications.GetBlockingProcessesAsync(row.Path);
+            if (blockers.Count != 0)
+            {
+                await ConfirmForceStopAsync(row.Path, blockers);
+                return;
+            }
             attemptedLaunch = true;
             operationFailed = true;
             launchedPath = (await _applications.LaunchAsync(row.Path, routingEnabled: true)).RegisteredPath;
@@ -377,13 +383,8 @@ public partial class MainWindow : Window
         SetBusy(true);
         try
         {
-            // 展示的快照就是用户确认的范围；确认后不再扩展到新出现的进程。
             var snapshot = await _applications.GetBlockingProcessesAsync(row.Path);
-            var list = string.Join("\n\n", snapshot.Select(process =>
-                $"{process.Name} (PID {process.ProcessId})\n{process.ExecutablePath}"));
-            if (!PaperDialog.Confirm(this,
-                $"当前阻塞应用开启的进程：\n{list}\n\n是否全部停止", snapshot.Count > 0)) return;
-            await _applications.ForceStopBlockingProcessesAsync(row.Path, snapshot);
+            if (!await ConfirmForceStopAsync(row.Path, snapshot)) return;
             await RefreshStatesAsync(force: true);
         }
         catch (Exception ex)
@@ -393,6 +394,17 @@ public partial class MainWindow : Window
         }
         finally { SetBusy(false); }
     }
+    private async Task<bool> ConfirmForceStopAsync(string path, IReadOnlyList<ApplicationBlockingProcess> snapshot)
+    {
+        // Both callers stop only the snapshot shown in this dialog.
+        var list = string.Join("\n\n", snapshot.Select(process =>
+            $"{process.Name} (PID {process.ProcessId})\n{process.ExecutablePath}"));
+        if (!PaperDialog.Confirm(this,
+            $"当前阻塞应用开启的进程：\n{list}\n\n是否全部停止", snapshot.Count > 0)) return false;
+        await _applications.ForceStopBlockingProcessesAsync(path, snapshot);
+        return true;
+    }
+
     private async void Remove_Click(object sender, RoutedEventArgs e)
     {
         if (AppList.SelectedItem is not ApplicationRow row) return;
