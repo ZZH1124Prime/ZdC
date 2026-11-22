@@ -587,12 +587,7 @@ int wmain(int argc, wchar_t **argv)
     return finish(0);
 }
 
-// 编译：在 x64 Native Tools Command Prompt 中进入 D:\ZdC\artifacts\socket-proof。
-// 本命令编译当前文件；另外两个源文件的末尾也有各自的编译命令。
-// clang-format off
-// cl /nologo /std:c++17 /utf-8 /EHsc /W4 /MT /I ..\..\third_party\Detours\include ..\..\SocketController.cpp ..\..\third_party\Detours\lib.X64\detours.lib /Fe:ZdC.SocketController.exe /Fo:Controller.obj
-// clang-format on
-// 三个文件编译完成后运行 .\ZdC.SocketController.exe，三个探针同步验证两轮。
+// 构建：从仓库根目录执行 python -B src/native/build.py（产物在 artifacts/native）。
 
 // 微信预检（只读）：.\ZdC.SocketController.exe --weixin --check
 // 用户自行退出微信后启动验证：.\ZdC.SocketController.exe --weixin

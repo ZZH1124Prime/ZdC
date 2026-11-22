@@ -597,10 +597,4 @@ int main()
     return directSucceeded && defaultSucceeded ? 0 : 4;
 }
 
-// 编译：在 x64 Native Tools Command Prompt 中进入
-// D:\ZdC\artifacts\socket-proof。
-// 本命令编译当前文件；另外两个源文件的末尾也有各自的编译命令。
-// clang-format off
-// cl /nologo /std:c++17 /utf-8 /EHsc /W4 /MT ..\..\SocketProbe.cpp /Fe:ZdC.SocketProbe.exe /Fo:Probe.obj
-// clang-format on
-// 三个文件编译完成后运行 .\ZdC.SocketController.exe，自动完成两轮并退出。
+// 构建：从仓库根目录执行 python -B src/native/build.py（产物在 artifacts/native）。
