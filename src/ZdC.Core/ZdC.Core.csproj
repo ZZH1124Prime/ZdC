@@ -4,5 +4,4 @@
     <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks><PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
-  <ItemGroup><EmbeddedResource Include="Upstream\Localization\en.json" LogicalName="upstream.en.json" /></ItemGroup>
 </Project>
