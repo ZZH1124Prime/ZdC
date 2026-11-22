@@ -7,12 +7,14 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
+using ZdC.Core;
 
 namespace ZdC.App;
 
 public partial class MainWindow
 {
     private const int TrayTooltipHideDistance = 160;
+    private const int DirectLostSeconds = 30;
 
     private Forms.NotifyIcon? _trayIcon;
     private Task? _shutdownTask;
@@ -20,6 +22,7 @@ public partial class MainWindow
     private DispatcherTimer? _trayTooltipTimer;
     private System.Drawing.Point _trayTooltipAnchor;
     private bool _trayTooltipLoading;
+    private readonly Dictionary<string, DateTimeOffset> _lastDirectObserved = new(StringComparer.OrdinalIgnoreCase);
 
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
@@ -90,13 +93,13 @@ public partial class MainWindow
         try
         {
             var pointer = Forms.Cursor.Position;
-            var names = await LoadDirectApplicationNamesAsync();
+            var (names, states) = await LoadDirectStatusAsync();
             if (_shutdownCompleted || _trayIcon is null || !_trayIcon.Visible || _shutdownTask is not null) return;
             var current = Forms.Cursor.Position;
             if (Math.Abs(current.X - pointer.X) > 80 || Math.Abs(current.Y - pointer.Y) > 80) return;
             _trayTooltip ??= new TrayTooltip();
             _trayTooltipAnchor = current;
-            _trayTooltip.ShowApplications(names, current);
+            _trayTooltip.ShowApplications(names, states, current);
             _trayTooltipTimer ??= CreateTrayTooltipTimer();
             _trayTooltipTimer.Start();
         }
@@ -127,21 +130,53 @@ public partial class MainWindow
         if (_trayTooltip is { IsVisible: true }) _trayTooltip.Hide();
     }
 
-    private async Task<IReadOnlyList<string>> LoadDirectApplicationNamesAsync()
+    /// <summary>悬停提示只列出正在运行的登记应用；未运行的应用没有可观察的连接。</summary>
+    private async Task<(string[] Names, string[] States)> LoadDirectStatusAsync()
     {
-        if (_shutdownCompleted) return [];
         var names = new List<string>();
+        var states = new List<string>();
+        if (_shutdownCompleted) return ([], []);
         foreach (var entry in _entries)
         {
             if (_shutdownCompleted) break;
             try
             {
                 var state = await _applications.GetSessionStateAsync(entry.Path);
-                if (state.IsRunning && state.RoutingEnabled) names.Add(entry.Name);
+                if (!state.IsRunning) continue;
+                TrackDirectObservation(entry.Path, state);
+                names.Add(entry.Name);
+                states.Add(DescribeDirectState(entry.Path, state));
             }
             catch (Exception) { }
         }
-        return names;
+        return (names.ToArray(), states.ToArray());
+    }
+
+    /// <summary>界面刷新和悬停提示共用同一份“最近一次观测到直连”的记录。</summary>
+    private void TrackDirectObservation(string path, ApplicationSessionState state)
+    {
+        if (!state.IsRunning || !state.RoutingEnabled)
+        {
+            _lastDirectObserved.Remove(path);
+            return;
+        }
+        if (state.ConnectionStatus == ApplicationConnectionStatus.DirectObserved)
+            _lastDirectObserved[path] = DateTimeOffset.UtcNow;
+    }
+
+    private string DescribeDirectState(string path, ApplicationSessionState state)
+    {
+        if (!state.RoutingEnabled) return "未开";
+        return state.ConnectionStatus switch
+        {
+            ApplicationConnectionStatus.DirectObserved => "正常",
+            ApplicationConnectionStatus.DefaultObserved => "正常",
+            ApplicationConnectionStatus.Unavailable => "未知",
+            _ => _lastDirectObserved.TryGetValue(path, out var last)
+                && DateTimeOffset.UtcNow - last > TimeSpan.FromSeconds(DirectLostSeconds)
+                ? "已掉"
+                : "等待",
+        };
     }
 
     private Task StopSessionsAsync() => _shutdownTask ??= _applications.DisposeAsync().AsTask();

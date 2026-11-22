@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -17,7 +18,7 @@ namespace ZdC.App;
 /// </summary>
 internal sealed class TrayTooltip : Window
 {
-    private const int MaximumNamesPerLine = 4;
+    private const int MaximumItemsPerLine = 4;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpShowWindow = 0x0040;
@@ -25,6 +26,10 @@ internal sealed class TrayTooltip : Window
 
     private readonly TextBlock _text;
     private readonly Border _surface;
+    private Brush _foreground = Brushes.Black;
+    private Brush _muted = Brushes.Gray;
+    private Brush _success = Brushes.Green;
+    private Brush _danger = Brushes.Red;
 
     public TrayTooltip()
     {
@@ -46,7 +51,7 @@ internal sealed class TrayTooltip : Window
             LineHeight = 20,
             LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = 420,
+            MaxWidth = 440,
         };
         _surface = new Border
         {
@@ -64,23 +69,27 @@ internal sealed class TrayTooltip : Window
         ApplyTheme();
     }
 
-    /// <summary>安装器的选择和应用内的偏好共用一个文件，标题行先写“当前直连”。</summary>
-    internal static string FormatApplications(IReadOnlyList<string> names)
+    /// <summary>纯文本形式便于校验：第一行标题，之后每行最多四项，每项为“名称 状态”。</summary>
+    internal static string FormatApplications(IReadOnlyList<string> names, IReadOnlyList<string> states)
     {
-        if (names.Count == 0) return "当前没有直连应用";
-        var lines = new List<string>();
-        for (var index = 0; index < names.Count; index += MaximumNamesPerLine)
+        if (names.Count == 0) return "没有正在运行的登记应用";
+        var lines = new List<string> { "直连状态" };
+        for (var index = 0; index < names.Count; index += MaximumItemsPerLine)
         {
-            var group = string.Join("、", names.Skip(index).Take(MaximumNamesPerLine));
-            lines.Add(index == 0 ? "当前直连：" + group : group);
+            var count = Math.Min(MaximumItemsPerLine, names.Count - index);
+            var items = new string[count];
+            for (var offset = 0; offset < count; offset++)
+                items[offset] = names[index + offset] + " " + states[index + offset];
+            lines.Add(string.Join("、", items));
         }
         return string.Join("\n", lines);
     }
 
-    public void ShowApplications(IReadOnlyList<string> names, System.Drawing.Point cursor)
+    public void ShowApplications(IReadOnlyList<string> names, IReadOnlyList<string> states,
+        System.Drawing.Point cursor)
     {
         ApplyTheme();
-        _text.Text = FormatApplications(names);
+        Render(names, states);
         Show();
         UpdateLayout();
         var handle = new WindowInteropHelper(this).Handle;
@@ -93,18 +102,52 @@ internal sealed class TrayTooltip : Window
         SetWindowPos(handle, HwndTopmost, left, top, 0, 0, SwpNoSize | SwpNoActivate | SwpShowWindow);
     }
 
+    private void Render(IReadOnlyList<string> names, IReadOnlyList<string> states)
+    {
+        _text.Inlines.Clear();
+        if (names.Count == 0)
+        {
+            _text.Inlines.Add(new Run("没有正在运行的登记应用") { Foreground = _muted });
+            return;
+        }
+        _text.Inlines.Add(new Run("直连状态") { Foreground = _muted, FontSize = 12 });
+        for (var index = 0; index < names.Count; index += MaximumItemsPerLine)
+        {
+            _text.Inlines.Add(new LineBreak());
+            var end = Math.Min(names.Count, index + MaximumItemsPerLine);
+            for (var item = index; item < end; item++)
+            {
+                if (item > index) _text.Inlines.Add(new Run("、") { Foreground = _muted });
+                _text.Inlines.Add(new Run(names[item]) { Foreground = _foreground });
+                _text.Inlines.Add(new Run(" ") { Foreground = _muted });
+                _text.Inlines.Add(new Run(states[item]) { Foreground = StatusBrush(states[item]) });
+            }
+        }
+    }
+
+    private Brush StatusBrush(string state) => state switch
+    {
+        "正常" => _success,
+        "已掉" => _danger,
+        _ => _muted,
+    };
+
     private void ApplyTheme()
     {
         var light = IsLightTheme();
         var background = new SolidColorBrush(light ? Color.FromRgb(0xF9, 0xF9, 0xF9) : Color.FromRgb(0x2B, 0x2B, 0x2B));
         var border = new SolidColorBrush(light ? Color.FromRgb(0xE5, 0xE5, 0xE5) : Color.FromRgb(0x3D, 0x3D, 0x3D));
         var foreground = new SolidColorBrush(light ? Color.FromRgb(0x1A, 0x1A, 0x1A) : Color.FromRgb(0xF2, 0xF2, 0xF2));
-        background.Freeze();
-        border.Freeze();
-        foreground.Freeze();
+        var muted = new SolidColorBrush(light ? Color.FromRgb(0x6B, 0x6B, 0x6B) : Color.FromRgb(0xA8, 0xA8, 0xA8));
+        var success = new SolidColorBrush(light ? Color.FromRgb(0x1E, 0x7A, 0x3C) : Color.FromRgb(0x6C, 0xD1, 0x8A));
+        var danger = new SolidColorBrush(light ? Color.FromRgb(0xB8, 0x32, 0x2A) : Color.FromRgb(0xFF, 0x8A, 0x80));
+        foreach (var brush in new[] { background, border, foreground, muted, success, danger }) brush.Freeze();
         _surface.Background = background;
         _surface.BorderBrush = border;
-        _text.Foreground = foreground;
+        _foreground = foreground;
+        _muted = muted;
+        _success = success;
+        _danger = danger;
     }
 
     private static bool IsLightTheme()

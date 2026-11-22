@@ -163,6 +163,7 @@ public partial class MainWindow : Window
                 {
                     var state = await _applications.GetSessionStateAsync(row.Path);
                     states.Add(state);
+                    TrackDirectObservation(row.Path, state);
                     row.SetState(File.Exists(row.Path), state.IsRunning, state.RoutingEnabled);
                     row.SetTelemetry(state);
                     if (state.IsRunning && state.RoutingEnabled) running++;
