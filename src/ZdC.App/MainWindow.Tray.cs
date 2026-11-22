@@ -67,12 +67,12 @@ public partial class MainWindow
     private Forms.ContextMenuStrip CreateTrayMenu()
     {
         var menu = new Forms.ContextMenuStrip();
-        var open = new Forms.ToolStripMenuItem("打开 ZdC")
+        var open = new Forms.ToolStripMenuItem("打开主界面")
         {
             Font = new System.Drawing.Font(System.Drawing.SystemFonts.MenuFont, System.Drawing.FontStyle.Bold),
         };
         open.Click += (_, _) => ShowFromTray();
-        var exit = new Forms.ToolStripMenuItem("退出 ZdC");
+        var exit = new Forms.ToolStripMenuItem("退出");
         exit.Click += (_, _) => ExitFromTray();
         menu.Items.Add(open);
         menu.Items.Add(new Forms.ToolStripSeparator());
