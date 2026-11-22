@@ -336,8 +336,26 @@ def write_checksums(release: Release) -> Path | None:
 # GitHub Release
 # ---------------------------------------------------------------------------
 
+def gh_path() -> str:
+    """返回 gh 可执行文件；优先 PATH，其次 Windows 常见安装目录。"""
+    found = shutil.which("gh")
+    if found:
+        return found
+    candidates = []
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(Path(program_files) / "GitHub CLI" / "gh.exe")
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "Programs" / "GitHub CLI" / "gh.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 def gh_available() -> bool:
-    return shutil.which("gh") is not None
+    return bool(gh_path())
 
 
 def github_token() -> str:
@@ -348,7 +366,7 @@ def release_asset_names(release: Release) -> list[str] | None:
     """返回已有 Release 的附件名；Release 不存在时返回 None。"""
     if gh_available():
         result = subprocess.run(
-            ["gh", "release", "view", release.tag, "--json", "assets"],
+            [gh_path(), "release", "view", release.tag, "--json", "assets"],
             cwd=release.repo, text=True, capture_output=True,
         )
         if result.returncode != 0:
@@ -377,7 +395,7 @@ def release_asset_names(release: Release) -> list[str] | None:
 
 
 def publish_with_gh(release: Release, entries: list[tuple[Path, str]], notes: str) -> None:
-    command = ["gh", "release", "create", release.tag,
+    command = [gh_path(), "release", "create", release.tag,
                *[str(path) for path, _ in entries],
                "--title", release.title,
                "--notes-file", str(release.notes)]
@@ -391,7 +409,7 @@ def publish_with_gh(release: Release, entries: list[tuple[Path, str]], notes: st
 
 
 def upload_missing_with_gh(release: Release, entries: list[tuple[Path, str]]) -> None:
-    command = ["gh", "release", "upload", release.tag,
+    command = [gh_path(), "release", "upload", release.tag,
                *[str(path) for path, _ in entries], "--clobber"]
     run(command, cwd=release.repo, capture=False)
 
