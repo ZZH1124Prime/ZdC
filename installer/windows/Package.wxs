@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ZdC Windows 安装包（WiX v4/v5 语法）。
+
+  installer/windows/build.py 会通过 -d 传入 Version、ProductCode、UpgradeCode 和
+  PayloadDir，并在临时目录生成 Files.wxs（每个载荷文件一个 Component）后与本文件
+  一起交给 wix build。
+
+  UpgradeCode 固定表示同一产品族；ProductCode 由版本推导，规则与旧 msilib 安装包
+  一致，保证既往安装可以继续识别和覆盖升级。PackageCode 由 WiX 每次构建生成。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="ZdC"
+           Manufacturer="ZdC"
+           Version="$(var.Version)"
+           ProductCode="$(var.ProductCode)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Language="1033"
+           InstallerVersion="500"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <!-- 新版本覆盖旧版本；降级由 LaunchCondition 阻止。 -->
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 ZdC，请先卸载后再安装。"
+                  Schedule="afterInstallInitialize" AllowSameVersionUpgrades="no" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <!-- 安装器启动时用 INSTALLDIR 传入用户选择的目录，必须在提权安装中保持可用。 -->
+    <Property Id="INSTALLDIR" Secure="yes" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize" Sequence="execute" />
+
+    <Launch Condition="VersionNT64" Message="ZdC 需要 64 位 Windows。" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="ZdC" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ZdCMenu" Name="ZdC" />
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="Main" Title="ZdC" Level="1">
+      <ComponentGroupRef Id="Files" />
+    </Feature>
+    <!-- 默认不安装；安装器用 ADDLOCAL=Main,Desktop 打开。 -->
+    <Feature Id="Desktop" Title="桌面快捷方式" Level="2">
+      <ComponentRef Id="DesktopShortcutComponent" />
+    </Feature>
+
+    <Component Id="DesktopShortcutComponent" Directory="DesktopFolder"
+               Guid="{AFD9BA54-C84A-50BC-9196-22434318844B}">
+      <Shortcut Id="DesktopShortcut" Name="ZdC" Target="[#F_ZdC_exe]" WorkingDirectory="INSTALLDIR" />
+      <RegistryValue Root="HKLM" Key="Software\ZdC\Installer" Name="DesktopShortcut"
+                     Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>
