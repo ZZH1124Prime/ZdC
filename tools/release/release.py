@@ -527,7 +527,10 @@ def print_plan(release: Release, commit: str) -> None:
     log(f"标签：{release.tag} -> {commit[:12]}")
     log(f"标题：{release.title}")
     log(f"说明：{release.notes}")
-    log(f"附件：{len(release.assets())} 个")
+    main_assets = release.assets()
+    extra_assets = release.extra_entries()
+    log(f"附件：{len(main_assets) + len(extra_assets)} 个"
+        f"（安装产物 {len(main_assets)}，额外 {len(extra_assets)}）")
     if release.dry_run:
         log("模式：dry-run（只打印计划，不修改任何内容）")
 
