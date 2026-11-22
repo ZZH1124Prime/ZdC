@@ -19,9 +19,9 @@
         "artifacts/windows/ZdC-Setup-{version}-Windows-x64-*.receipt.txt"
       ],
       "extra_assets": [
-        "third_party/Detours/LICENSE",
-        "third_party/trafik-ruler/LICENSE",
-        "third_party/trafik-ruler/THIRD_PARTY_NOTICES.md"
+        { "path": "third_party/Detours/LICENSE", "name": "Detours-LICENSE.txt" },
+        { "path": "third_party/trafik-ruler/LICENSE", "name": "trafik-ruler-LICENSE.txt" },
+        { "path": "third_party/trafik-ruler/THIRD_PARTY_NOTICES.md", "name": "trafik-ruler-THIRD_PARTY_NOTICES.md" }
       ],
       "sha256sums": "artifacts/windows/SHA256SUMS-{version}.txt",
       "receipt": "artifacts/windows/ZdC-Setup-{version}-Windows-x64-*.receipt.txt",

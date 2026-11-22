@@ -80,10 +80,12 @@ Windows 也可以直接运行 `tools\release\release.cmd`，Linux/macOS 可以�
 | `platform` | `auto`（按当前系统选择）、`windows`、`linux` 或自定义键 |
 | `platforms.<平台>.build` | 构建命令列表，按顺序执行 |
 | `platforms.<平台>.assets` | 要上传的附件 glob，支持 `{version}` |
-| `platforms.<平台>.extra_assets` | 许可证、声明等额外附件 |
+| `platforms.<平台>.extra_assets` | 许可证、声明等额外附件。可以写 glob 字符串，也可以写 `{"path": "...", "name": "上传后的文件名"}`；不同目录的同名文件（如两个 `LICENSE`）用 `name` 区分，脚本也会自动去重 |
 | `platforms.<平台>.sha256sums` | 生成校验文件的位置（会一起上传） |
 | `platforms.<平台>.receipt` / `receipt_commit_pattern` | 可选，用于核对构建回执里的源码提交与 `tag_commit` |
 | `release` | `draft` / `prerelease` / `latest` 三项发布选项 |
+
+已有 Release 但上次上传中断时，重新运行脚本会检查附件名，补传缺失/同名附件（`gh release upload --clobber`），不需要先删除 Release。
 
 ## 在其它项目或 Linux 上使用
 

@@ -23,6 +23,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -157,7 +158,59 @@ class Release:
         return found
 
     def assets(self) -> list[Path]:
-        return self.find(self.settings.get("assets")) + self.find(self.settings.get("extra_assets"))
+        """安装包等主要附件；校验文件只针对这些文件生成。"""
+        return self.find(self.settings.get("assets"))
+
+    def extra_entries(self) -> list[tuple[Path, str]]:
+        """额外附件。字符串直接使用文件名；对象可用 name 指定上传名。
+
+        例如：{"path": "third_party/Detours/LICENSE", "name": "Detours-LICENSE.txt"}
+        """
+        entries: list[tuple[Path, str]] = []
+        for entry in self.settings.get("extra_assets") or []:
+            if isinstance(entry, str):
+                entries.extend((item, item.name) for item in self.find([entry]))
+            elif isinstance(entry, dict):
+                pattern = entry.get("path")
+                if not pattern:
+                    fail("extra_assets 的对象缺少 path。")
+                matches = self.find([str(pattern)])
+                preferred = str(entry.get("name") or "").strip()
+                for index, item in enumerate(matches, 1):
+                    name = preferred or item.name
+                    if len(matches) > 1:
+                        stem, suffix = Path(name).stem, Path(name).suffix
+                        name = f"{stem}-{index}{suffix}"
+                    entries.append((item, name))
+            else:
+                fail("extra_assets 只能是字符串或 {path, name} 对象。")
+        return entries
+
+    def upload_entries(self) -> list[tuple[Path, str]]:
+        """返回 (实际上传文件, 上传名)。同名附件会自动按父目录/序号改名。"""
+        entries = [(item, item.name) for item in self.assets()] + self.extra_entries()
+        counts = Counter(name for _, name in entries)
+        used: Counter[str] = Counter()
+        staging = self.repo / "artifacts" / "release-assets" / self.version
+        prepared: list[tuple[Path, str]] = []
+        for source, name in entries:
+            final = name
+            if counts[name] > 1:
+                stem, suffix = Path(name).stem, Path(name).suffix
+                final = f"{source.parent.name}-{stem}{suffix}"
+            if used[final]:
+                stem, suffix = Path(final).stem, Path(final).suffix
+                final = f"{stem}-{used[final] + 1}{suffix}"
+            used[final] += 1
+            if final == source.name:
+                prepared.append((source, final))
+                continue
+            staging.mkdir(parents=True, exist_ok=True)
+            target = staging / final
+            if not target.is_file() or sha256(target) != sha256(source):
+                shutil.copyfile(source, target)
+            prepared.append((target, final))
+        return prepared
 
     def checksums_path(self) -> Path | None:
         relative = self.settings.get("sha256sums")
@@ -291,16 +344,22 @@ def github_token() -> str:
     return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
 
 
-def release_exists(release: Release) -> bool:
+def release_asset_names(release: Release) -> list[str] | None:
+    """返回已有 Release 的附件名；Release 不存在时返回 None。"""
     if gh_available():
         result = subprocess.run(
-            ["gh", "release", "view", release.tag, "--json", "tagName"],
+            ["gh", "release", "view", release.tag, "--json", "assets"],
             cwd=release.repo, text=True, capture_output=True,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return None
+        try:
+            return [str(item["name"]) for item in json.loads(result.stdout).get("assets", [])]
+        except (json.JSONDecodeError, KeyError):
+            return None
     token = github_token()
     if not token:
-        return False
+        return None
     request = urllib.request.Request(
         f"{RELEASE_API}/repos/{release.repository}/releases/tags/{release.tag}",
         method="GET",
@@ -308,17 +367,18 @@ def release_exists(release: Release) -> bool:
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", "application/vnd.github+json")
     try:
-        with urllib.request.urlopen(request, timeout=30):
-            return True
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return [str(item["name"]) for item in payload.get("assets", [])]
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            return False
+            return None
         fail(f"查询 Release 失败：{error.code}")
 
 
-def publish_with_gh(release: Release, assets: list[Path], notes: str) -> None:
+def publish_with_gh(release: Release, entries: list[tuple[Path, str]], notes: str) -> None:
     command = ["gh", "release", "create", release.tag,
-               *[str(item) for item in assets],
+               *[str(path) for path, _ in entries],
                "--title", release.title,
                "--notes-file", str(release.notes)]
     if release.release_options.get("draft"):
@@ -327,6 +387,12 @@ def publish_with_gh(release: Release, assets: list[Path], notes: str) -> None:
         command.append("--prerelease")
     if release.release_options.get("latest", True):
         command.append("--latest")
+    run(command, cwd=release.repo, capture=False)
+
+
+def upload_missing_with_gh(release: Release, entries: list[tuple[Path, str]]) -> None:
+    command = ["gh", "release", "upload", release.tag,
+               *[str(path) for path, _ in entries], "--clobber"]
     run(command, cwd=release.repo, capture=False)
 
 
@@ -346,7 +412,14 @@ def api_request(url: str, token: str, method: str, data: bytes | None = None,
              f"{error.read().decode('utf-8', 'replace')}")
 
 
-def publish_with_api(release: Release, assets: list[Path], notes: str, token: str) -> None:
+def upload_asset_with_api(upload_url: str, name: str, path: Path, token: str) -> None:
+    url = f"{upload_url}?name={urllib.parse.quote(name)}"
+    api_request(url, token, "POST", path.read_bytes(), "application/octet-stream")
+    log(f"  已上传：{name}")
+
+
+def publish_with_api(release: Release, entries: list[tuple[Path, str]], notes: str,
+                     token: str) -> None:
     payload = json.dumps({
         "tag_name": release.tag,
         "target_commitish": release.branch,
@@ -358,40 +431,71 @@ def publish_with_api(release: Release, assets: list[Path], notes: str, token: st
     }).encode("utf-8")
     response = api_request(f"{RELEASE_API}/repos/{release.repository}/releases",
                            token, "POST", payload)
-    release_url = str(json.loads(response)["html_url"])
-    log(f"  已创建 Release：{release_url}")
-    upload_url = str(json.loads(response)["upload_url"]).split("{")[0]
-    for item in assets:
-        url = f"{upload_url}?name={urllib.parse.quote(item.name)}"
-        api_request(url, token, "POST", item.read_bytes(), "application/octet-stream")
-        log(f"  已上传：{item.name}")
+    created = json.loads(response)
+    log(f"  已创建 Release：{created.get('html_url')}")
+    upload_url = str(created["upload_url"]).split("{")[0]
+    for path, name in entries:
+        upload_asset_with_api(upload_url, name, path, token)
+
+
+def upload_to_existing_with_api(release: Release, entries: list[tuple[Path, str]],
+                                token: str) -> None:
+    response = api_request(
+        f"{RELEASE_API}/repos/{release.repository}/releases/tags/{release.tag}", token, "GET")
+    existing = json.loads(response)
+    asset_ids = {str(item["name"]): int(item["id"]) for item in existing.get("assets", [])}
+    upload_url = str(existing["upload_url"]).split("{")[0]
+    for path, name in entries:
+        if name in asset_ids:
+            api_request(f"{RELEASE_API}/repos/{release.repository}/releases/assets/"
+                        f"{asset_ids[name]}", token, "DELETE")
+            log(f"  已替换旧附件：{name}")
+        upload_asset_with_api(upload_url, name, path, token)
 
 
 def publish_if_needed(release: Release) -> None:
-    if release_exists(release):
-        log(f"  Release {release.tag} 已存在，跳过")
-        return
-    assets = release.assets()
+    existing_names = release_asset_names(release)
     checksums = None if release.dry_run else write_checksums(release)
+    entries = release.upload_entries()
     if checksums is not None:
-        assets.append(checksums)
+        entries.append((checksums, checksums.name))
     notes = release.notes_text()
+
     if release.dry_run:
-        log(f"  [计划] 创建 Release {release.tag}，上传 {len(assets)} 个附件")
+        if existing_names is None:
+            log(f"  [计划] 创建 Release {release.tag}，上传 {len(entries)} 个附件")
+        else:
+            log(f"  [计划] Release {release.tag} 已存在，补传/替换 {len(entries)} 个附件")
         if release.checksums_path() is not None:
             log(f"  [计划] 生成校验文件：{release.checksums_path().relative_to(release.repo)}")
-        for item in assets:
-            log(f"    {item.relative_to(release.repo)}")
+        for _, name in entries:
+            log(f"    {name}")
         return
+
+    if existing_names is not None:
+        complete = all(name in existing_names for _, name in entries)
+        if complete:
+            log(f"  Release {release.tag} 已存在且附件完整，跳过")
+            return
+        log(f"  Release {release.tag} 已存在但附件不完整，补传并覆盖同名附件")
+        if gh_available():
+            upload_missing_with_gh(release, entries)
+        else:
+            token = github_token()
+            if not token:
+                fail("没有 gh CLI，也没有 GH_TOKEN/GITHUB_TOKEN。")
+            upload_to_existing_with_api(release, entries, token)
+        return
+
     if gh_available():
-        publish_with_gh(release, assets, notes)
+        publish_with_gh(release, entries, notes)
         return
     token = github_token()
     if not token:
         fail("没有 gh CLI，也没有 GH_TOKEN/GITHUB_TOKEN。"
              "安装 gh（winget install --id GitHub.cli）后运行 gh auth login，"
              "或设置 token 环境变量。")
-    publish_with_api(release, assets, notes, token)
+    publish_with_api(release, entries, notes, token)
 
 
 # ---------------------------------------------------------------------------
