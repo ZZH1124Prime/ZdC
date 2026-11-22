@@ -1,14 +1,25 @@
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 
 namespace ZdC.App;
 
 public partial class MainWindow
 {
+    private const int TrayTooltipHideDistance = 160;
+
     private Forms.NotifyIcon? _trayIcon;
     private Task? _shutdownTask;
+    private TrayTooltip? _trayTooltip;
+    private DispatcherTimer? _trayTooltipTimer;
+    private System.Drawing.Point _trayTooltipAnchor;
+    private bool _trayTooltipLoading;
 
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
@@ -39,6 +50,7 @@ public partial class MainWindow
                     ?? throw new Win32Exception(1813);
                 _trayIcon = new Forms.NotifyIcon { Icon = icon };
                 _trayIcon.MouseClick += Tray_MouseClick;
+                _trayIcon.MouseMove += Tray_MouseMove;
             }
             _trayIcon.Visible = true;
             Hide();
@@ -51,11 +63,85 @@ public partial class MainWindow
 
     private void Tray_MouseClick(object? sender, Forms.MouseEventArgs e)
     {
+        HideTrayTooltip();
         if (e.Button != Forms.MouseButtons.Left || _shutdownCompleted) return;
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
         if (_trayIcon is not null) _trayIcon.Visible = false;
+    }
+
+    private void Tray_MouseMove(object? sender, Forms.MouseEventArgs e)
+    {
+        if (_shutdownCompleted || _trayIcon is null || !_trayIcon.Visible) return;
+        if (_trayTooltip is { IsVisible: true })
+        {
+            // 鼠标仍停在图标上时不断刷新锚点，避免提示窗被误判为“已离开”。
+            _trayTooltipAnchor = Forms.Cursor.Position;
+            return;
+        }
+        if (_trayTooltipLoading) return;
+        _trayTooltipLoading = true;
+        _ = ShowTrayTooltipAsync();
+    }
+
+    private async Task ShowTrayTooltipAsync()
+    {
+        try
+        {
+            var pointer = Forms.Cursor.Position;
+            var names = await LoadDirectApplicationNamesAsync();
+            if (_shutdownCompleted || _trayIcon is null || !_trayIcon.Visible || _shutdownTask is not null) return;
+            var current = Forms.Cursor.Position;
+            if (Math.Abs(current.X - pointer.X) > 80 || Math.Abs(current.Y - pointer.Y) > 80) return;
+            _trayTooltip ??= new TrayTooltip();
+            _trayTooltipAnchor = current;
+            _trayTooltip.ShowApplications(names, current);
+            _trayTooltipTimer ??= CreateTrayTooltipTimer();
+            _trayTooltipTimer.Start();
+        }
+        finally { _trayTooltipLoading = false; }
+    }
+
+    private DispatcherTimer CreateTrayTooltipTimer()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        timer.Tick += (_, _) =>
+        {
+            if (_trayTooltip is not { IsVisible: true } || _trayIcon is not { Visible: true })
+            {
+                HideTrayTooltip();
+                return;
+            }
+            var cursor = Forms.Cursor.Position;
+            if (Math.Abs(cursor.X - _trayTooltipAnchor.X) > TrayTooltipHideDistance ||
+                Math.Abs(cursor.Y - _trayTooltipAnchor.Y) > TrayTooltipHideDistance)
+                HideTrayTooltip();
+        };
+        return timer;
+    }
+
+    private void HideTrayTooltip()
+    {
+        _trayTooltipTimer?.Stop();
+        if (_trayTooltip is { IsVisible: true }) _trayTooltip.Hide();
+    }
+
+    private async Task<IReadOnlyList<string>> LoadDirectApplicationNamesAsync()
+    {
+        if (_shutdownCompleted) return [];
+        var names = new List<string>();
+        foreach (var entry in _entries)
+        {
+            if (_shutdownCompleted) break;
+            try
+            {
+                var state = await _applications.GetSessionStateAsync(entry.Path);
+                if (state.IsRunning && state.RoutingEnabled) names.Add(entry.Name);
+            }
+            catch (Exception) { }
+        }
+        return names;
     }
 
     private Task StopSessionsAsync() => _shutdownTask ??= _applications.DisposeAsync().AsTask();
@@ -67,6 +153,13 @@ public partial class MainWindow
         catch (Exception ex) { System.Diagnostics.Trace.TraceError(ex.ToString()); }
         finally
         {
+            HideTrayTooltip();
+            if (_trayTooltip is not null)
+            {
+                _trayTooltip.Close();
+                _trayTooltip = null;
+            }
+            _trayTooltipTimer = null;
             if (_trayIcon is not null)
             {
                 var icon = _trayIcon.Icon;
