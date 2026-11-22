@@ -57,6 +57,7 @@ PAYLOAD_FILES = (
     'ZdC.SocketHook32.dll', 'ZdC.SocketHook64.dll',
 )
 NATIVE_FILES = ('ZdC.SocketController.exe', 'ZdC.SocketHook32.dll', 'ZdC.SocketHook64.dll')
+APP_ICON = REPO / 'src' / 'ZdC.App' / 'Assets' / 'ZdC.ico'
 
 
 def log(message: str) -> None:
@@ -262,6 +263,7 @@ def build_msi(work: Path, payload: Path, version: str, product: str) -> Path:
         '-d', f'ProductCode={product}',
         '-d', f'UpgradeCode={FAMILY}',
         '-d', f'PayloadDir={payload}',
+        '-d', f'IconPath={APP_ICON}',
         '-o', str(msi), str(ROOT / 'Package.wxs'), str(files_fragment),
     ])
     if not msi.is_file():
@@ -366,6 +368,7 @@ def build_launcher(work: Path, version: str, identity: dict, package_sha: str,
     arguments = ['dotnet', str(compiler()), '/noconfig', '/nostdlib+', '/target:winexe',
                  '/platform:x64', '/optimize+', '/deterministic+', '/langversion:latest',
                  '/warnaserror+', '/out:' + str(exe),
+                 '/win32icon:' + str(APP_ICON),
                  '/win32manifest:' + str(work / 'setup.manifest')]
     for reference in ('mscorlib', 'System', 'System.Core', 'System.Xaml', 'WindowsBase',
                       'PresentationCore', 'PresentationFramework', 'System.Windows.Forms',

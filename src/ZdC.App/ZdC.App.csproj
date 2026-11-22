@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ZdC</AssemblyName>
     <RootNamespace>ZdC.App</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\ZdC.ico</ApplicationIcon>
   </PropertyGroup>

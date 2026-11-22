@@ -26,6 +26,10 @@
 
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- 应用图标：安装程序文件、控制面板卸载项共用同一份 ZdC.ico。 -->
+    <Icon Id="ZdCIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="ZdCIcon" />
+
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
     <!-- 安装器启动时用 INSTALLDIR 传入用户选择的目录，必须在提权安装中保持可用。 -->
