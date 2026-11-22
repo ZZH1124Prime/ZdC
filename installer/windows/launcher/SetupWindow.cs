@@ -243,7 +243,7 @@ partial class SetupWindow : Window
 /// <summary>安装器写用户偏好文件；应用启动时按同一路径读取，无需额外协议。</summary>
 internal static class TrayChoice
 {
-    private static readonly string Marker=Path.Combine(
+    private static readonly string Marker=System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ZdC","close-to-tray");
 
     internal static bool Enabled => File.Exists(Marker);
@@ -252,7 +252,7 @@ internal static class TrayChoice
     {
         if(enabled)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(Marker)!);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Marker)!);
             using var marker=new FileStream(Marker,FileMode.OpenOrCreate,FileAccess.Write,FileShare.Read);
         }
         else
