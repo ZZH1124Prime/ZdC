@@ -33,6 +33,22 @@ python -B installer/windows/build.py
 `artifacts/windows/` 生成一个内嵌 MSI 的单文件安装包和构建回执。构建要求工作区干净；
 测试包可以使用 `--allow-dirty`。
 
+## 发布
+
+仓库根目录的 [release.json](release.json) 描述当前版本、标签、构建命令和发布附件；
+[tools/release/release.py](tools/release/release.py) 是跨平台的通用发布脚本（Windows 和
+Linux 共用）。发新版时修改描述文件里的版本号，然后：
+
+~~~powershell
+python tools/release/release.py plan
+python tools/release/release.py doctor
+python tools/release/release.py build
+python tools/release/release.py tag --push --yes
+python tools/release/release.py publish --yes
+~~~
+
+详细字段和命令见 [tools/release/README.md](tools/release/README.md)。
+
 ## 运行语义
 
 设计目标是“先登记，再打开应用”：登记中的应用走直连，其他应用保持原有行为；工具退出后，

@@ -1,0 +1,34 @@
+{
+  "project": "ZdC",
+  "repo": "ZZH1124Prime/ZdC",
+  "remote": "origin",
+  "branch": "master",
+  "version": "0.1.2",
+  "tag": "v{version}",
+  "tag_commit": "a4c160e1e258cac9b675826fe6abed9ddc54c670",
+  "title": "ZdC {version} — Windows x64",
+  "notes": "artifacts/windows/RELEASE_NOTES-{version}.md",
+  "platform": "auto",
+  "platforms": {
+    "windows": {
+      "build": ["python -B installer/windows/build.py"],
+      "assets": [
+        "artifacts/windows/ZdC-Setup-{version}-Windows-x64-*.exe",
+        "artifacts/windows/ZdC-Setup-{version}-Windows-x64-*.receipt.txt"
+      ],
+      "extra_assets": [
+        "third_party/Detours/LICENSE",
+        "third_party/trafik-ruler/LICENSE",
+        "third_party/trafik-ruler/THIRD_PARTY_NOTICES.md"
+      ],
+      "sha256sums": "artifacts/windows/SHA256SUMS-{version}.txt",
+      "receipt": "artifacts/windows/ZdC-Setup-{version}-Windows-x64-*.receipt.txt",
+      "receipt_commit_pattern": "源码提交：([0-9a-f]{40})"
+    }
+  },
+  "release": {
+    "draft": false,
+    "prerelease": false,
+    "latest": true
+  }
+}
