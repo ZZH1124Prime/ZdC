@@ -16,6 +16,7 @@ public partial class MainWindow
     private const int TrayTooltipHideDistance = 160;
 
     private Forms.NotifyIcon? _trayIcon;
+    private Forms.ContextMenuStrip? _trayMenu;
     private Task? _shutdownTask;
     private TrayTooltip? _trayTooltip;
     private DispatcherTimer? _trayTooltipTimer;
@@ -49,7 +50,8 @@ public partial class MainWindow
             {
                 var icon = System.Drawing.Icon.ExtractIcon(Path.Combine(AppContext.BaseDirectory, "ZdC.exe"), 0, true)
                     ?? throw new Win32Exception(1813);
-                _trayIcon = new Forms.NotifyIcon { Icon = icon };
+                _trayMenu = CreateTrayMenu();
+                _trayIcon = new Forms.NotifyIcon { Icon = icon, ContextMenuStrip = _trayMenu };
                 _trayIcon.MouseClick += Tray_MouseClick;
                 _trayIcon.MouseMove += Tray_MouseMove;
             }
@@ -62,14 +64,53 @@ public partial class MainWindow
         }
     }
 
-    private void Tray_MouseClick(object? sender, Forms.MouseEventArgs e)
+    private Forms.ContextMenuStrip CreateTrayMenu()
+    {
+        var menu = new Forms.ContextMenuStrip();
+        var open = new Forms.ToolStripMenuItem("打开 ZdC")
+        {
+            Font = new System.Drawing.Font(System.Drawing.SystemFonts.MenuFont, System.Drawing.FontStyle.Bold),
+        };
+        open.Click += (_, _) => ShowFromTray();
+        var exit = new Forms.ToolStripMenuItem("退出 ZdC");
+        exit.Click += (_, _) => ExitFromTray();
+        menu.Items.Add(open);
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add(exit);
+        menu.Opening += (_, _) => HideTrayTooltip();
+        return menu;
+    }
+
+    private void ShowFromTray()
     {
         HideTrayTooltip();
-        if (e.Button != Forms.MouseButtons.Left || _shutdownCompleted) return;
+        if (_shutdownCompleted) return;
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
         Activate();
         if (_trayIcon is not null) _trayIcon.Visible = false;
+    }
+
+    private void ExitFromTray()
+    {
+        HideTrayTooltip();
+        if (_shutdownCompleted) return;
+        if (_busy || _applicationOperations.Count > 0)
+        {
+            Show();
+            Activate();
+            StatusText.Text = "正在完成当前操作，请稍后关闭。";
+            return;
+        }
+        if (_trayIcon is not null) _trayIcon.Visible = false;
+        Close();
+    }
+
+    private void Tray_MouseClick(object? sender, Forms.MouseEventArgs e)
+    {
+        HideTrayTooltip();
+        if (e.Button != Forms.MouseButtons.Left || _shutdownCompleted) return;
+        ShowFromTray();
     }
 
     private void Tray_MouseMove(object? sender, Forms.MouseEventArgs e)
@@ -164,6 +205,11 @@ public partial class MainWindow
                 _trayTooltip = null;
             }
             _trayTooltipTimer = null;
+            if (_trayMenu is not null)
+            {
+                _trayMenu.Dispose();
+                _trayMenu = null;
+            }
             if (_trayIcon is not null)
             {
                 var icon = _trayIcon.Icon;
