@@ -240,6 +240,7 @@ def write_files_fragment(work: Path) -> Path:
         '      <File Id="F_ZdC_exe" Source="$(var.PayloadDir)\\ZdC.exe" KeyPath="yes" />\n'
         '      <Shortcut Id="MenuShortcut" Directory="ZdCMenu" Name="ZdC" Target="[#F_ZdC_exe]" WorkingDirectory="INSTALLDIR" />\n'
         '      <RemoveFolder Id="RemoveZdCMenu" Directory="ZdCMenu" On="uninstall" />\n'
+        '      <RemoveFile Id="RemoveLegacySocketHook" Name="ZdC.SocketHook.dll" On="install" />\n'
         '    </Component>')
     fragment = ('<?xml version="1.0" encoding="utf-8"?>\n'
                 '<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">\n  <Fragment>\n'
