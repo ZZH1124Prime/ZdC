@@ -38,7 +38,7 @@ partial class SetupWindow : Window
     private readonly CheckBox desktop=new CheckBox();
     private readonly CheckBox tray=new CheckBox();
     private Installed existing;
-    private bool busy, updating;
+    private bool busy, updating, trayInitialized;
     private TextBlock status;
     private ProgressBar progress;
     private StackPanel buttons;
@@ -160,13 +160,14 @@ partial class SetupWindow : Window
             existing=registered;updating=existing!=null;
             if(updating && Version.Parse(existing.Version)>Version.Parse(Identity.Version)){Editable(false);Fault(1638,LoadOptions);return false;}
             if(updating) folder.Text=existing.Directory.TrimEnd('\\');
-            if(updating) tray.IsChecked=TrayChoice.Enabled;
             Editable(true);return true;
         } catch(Exception e){Editable(false);Fault(ErrorNumber(e),LoadOptions);return false;}
     }
     private void LoadOptions()
     {
         if(!RefreshRegistration(LoadOptions))return;
+        // 只在首次成功读取注册状态时用已有偏好初始化；之后保留用户在窗口里的选择。
+        if(!trayInitialized){ if(updating) tray.IsChecked=TrayChoice.Enabled; trayInitialized=true; }
         status.Text="";progress.Visibility=Visibility.Hidden;
         Buttons(ActionButton("安装",Begin,true),ActionButton("取消",Close));
     }
