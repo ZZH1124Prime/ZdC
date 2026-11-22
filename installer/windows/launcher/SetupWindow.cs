@@ -36,6 +36,7 @@ partial class SetupWindow : Window
     private readonly StackPanel body=new StackPanel {Margin=new Thickness(40,25,40,27)};
     private readonly TextBox folder=new TextBox();
     private readonly CheckBox desktop=new CheckBox();
+    private readonly CheckBox tray=new CheckBox();
     private Installed existing;
     private bool busy, updating;
     private TextBlock status;
@@ -61,7 +62,7 @@ partial class SetupWindow : Window
 
     public SetupWindow()
     {
-        Title="安装 ZdC"; Width=570; Height=351; MinHeight=330; MinWidth=500;
+        Title="安装 ZdC"; Width=570; Height=392; MinHeight=372; MinWidth=500;
         WindowStartupLocation=WindowStartupLocation.CenterScreen;
         WindowStyle=WindowStyle.None; AllowsTransparency=true; Background=Brushes.Transparent;
         ResizeMode=ResizeMode.NoResize; UseLayoutRounding=true; FontFamily=new FontFamily("Palatino Linotype, KaiTi"); FontSize=17;
@@ -126,6 +127,10 @@ partial class SetupWindow : Window
         desktop.Content=Label("创建桌面快捷方式");desktop.VerticalContentAlignment=VerticalAlignment.Center;
         desktop.FocusVisualStyle=(Style)FindResource("KeyboardOnlyFocus");
         AutomationProperties.SetName(desktop,"创建桌面快捷方式");body.Children.Add(desktop);
+        // 默认勾选；更新安装时在 RefreshRegistration 里改为读取用户当前偏好。
+        tray.IsChecked=true;tray.Content=Label("关闭窗口后最小化到托盘");tray.VerticalContentAlignment=VerticalAlignment.Center;
+        tray.Margin=new Thickness(0,6,0,0);tray.FocusVisualStyle=(Style)FindResource("KeyboardOnlyFocus");
+        AutomationProperties.SetName(tray,"关闭窗口后最小化到托盘");body.Children.Add(tray);
         status=Label("");status.Margin=new Thickness(0,7,0,3);status.MinHeight=24;body.Children.Add(status);
         progress=new ProgressBar {Minimum=0,Maximum=100,Height=8,Visibility=Visibility.Hidden,
             Background=(Brush)FindResource("InsetSurface"),Foreground=(Brush)FindResource("StoneGlyph")};
@@ -144,7 +149,7 @@ partial class SetupWindow : Window
     }
     private void Editable(bool enabled)
     {
-        folder.IsReadOnly=updating || !enabled;browseButton.IsEnabled=enabled && !updating;desktop.IsEnabled=enabled;
+        folder.IsReadOnly=updating || !enabled;browseButton.IsEnabled=enabled && !updating;desktop.IsEnabled=enabled;tray.IsEnabled=enabled;
     }
     private bool RefreshRegistration(Action retry)
     {
@@ -155,6 +160,7 @@ partial class SetupWindow : Window
             existing=registered;updating=existing!=null;
             if(updating && Version.Parse(existing.Version)>Version.Parse(Identity.Version)){Editable(false);Fault(1638,LoadOptions);return false;}
             if(updating) folder.Text=existing.Directory.TrimEnd('\\');
+            if(updating) tray.IsChecked=TrayChoice.Enabled;
             Editable(true);return true;
         } catch(Exception e){Editable(false);Fault(ErrorNumber(e),LoadOptions);return false;}
     }
@@ -216,6 +222,8 @@ partial class SetupWindow : Window
             uint result=await Task.Run(()=>InstallEngine.Apply(existing,path,shortcut,owner,reporter,cancellation.Token,out logPath));
             if(result==0 || result==3010) {
                 exitCode=(int)result;progress.Value=100;status.Text=updating?"更新完成":"安装完成";
+                try { TrayChoice.Save(tray.IsChecked==true); }
+                catch(Exception ex) when(ex is IOException || ex is UnauthorizedAccessException) { status.Text += "（托盘设置保存失败）"; }
                 Buttons(ActionButton("完成",Close,true));
             } else if(result==1602 && cancellation.IsCancellationRequested){exitCode=1602;busy=false;Close();}
             else if(result==112 || result==39){exitCode=(int)result;Problem("磁盘空间不足，请选择其他位置。");}
@@ -229,5 +237,28 @@ partial class SetupWindow : Window
         if(cancellation==null || cancellation.IsCancellationRequested)return;
         cancellation.Cancel();
         foreach(Button button in buttons.Children)button.IsEnabled=false;
+    }
+}
+
+/// <summary>安装器写用户偏好文件；应用启动时按同一路径读取，无需额外协议。</summary>
+internal static class TrayChoice
+{
+    private static readonly string Marker=Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ZdC","close-to-tray");
+
+    internal static bool Enabled => File.Exists(Marker);
+
+    internal static void Save(bool enabled)
+    {
+        if(enabled)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Marker)!);
+            using var marker=new FileStream(Marker,FileMode.OpenOrCreate,FileAccess.Write,FileShare.Read);
+        }
+        else
+        {
+            try { File.Delete(Marker); }
+            catch(DirectoryNotFoundException) { }
+        }
     }
 }
