@@ -16,4 +16,4 @@ python -B installer/windows/build.py --check-build
 
 下一版先产出并核验新的 Windows 应用载荷，再在 `release.json` 中更新 Commit 和各文件的 Name、After（SHA-256），或者用 `--manifest` 和 `--payload` 指向本仓内的新清单和载荷目录。产品版本取自该提交的 `src/ZdC.App/ZdC.App.csproj`。较高版本延续现有 MSI UpgradeCode，ProductCode 按版本和架构确定，PackageCode 每次新建。因此重建核对载荷和安装数据库配置；已验收的正式包另以发布时 SHA-256 识别。
 
-发布使用 `artifacts/windows/ZdC-Setup-<版本>-Windows-x64-<提交前七位>.exe`。根目录的 Git 忽略规则覆盖 artifacts；构建源码、模板和发布输入清单在 installer/windows 中随源码管理。`installer/ZdC.iss` 是旧 Inno 定义，已交付的单页安装器使用本目录的 WPF 和 Windows Installer 实现。
+发布使用 `artifacts/windows/ZdC-Setup-<版本>-Windows-x64-<提交前七位>.exe`。根目录的 Git 忽略规则覆盖 artifacts；构建源码、模板和发布输入清单在 installer/windows 中随源码管理。

@@ -146,6 +146,12 @@ def build(work, release, commit, version, files, filename):
     rows('InstallExecuteSequence',[(a, 'OLDPRODUCTS' if a=='RemoveExistingProducts' else None,n) for a,n in execute])
     db.Commit()
     del db
+    size = sum((payload / item['Name']).stat().st_size for item in files)
+    return build_launcher(work, commit, version, product, package_code, msi, size, filename)
+
+
+def build_launcher(work, commit, version, product, package_code, msi, size, filename):
+    """Wrap a verified MSI without changing its package identity or its embedded cabinet."""
     # Copy only immutable visuals from the pinned Git tree. Use the original static XAML and size-dependent outline.
     src='src/ZdC.App/'
     for name in ['ZdC.png','ZdCMark.png']:
@@ -172,7 +178,7 @@ def build(work, release, commit, version, files, filename):
     (work/'Outline.cs').write_text(outline,encoding='utf-8-sig')
     identity = ('[assembly:System.Reflection.AssemblyVersion("'+version+'.0")]\n' +
                 '[assembly:System.Reflection.AssemblyFileVersion("'+version+'.0")]\n')
-    identity += 'internal static class Identity { internal const string Family="'+FAMILY+'", Product="'+product+'", PackageCode="'+package_code+'", Version="'+version+'", PackageSha="'+digest(msi.read_bytes())+'"; internal const long Size='+str(sum((payload/f['Name']).stat().st_size for f in files))+'L; }'
+    identity += 'internal static class Identity { internal const string Family="'+FAMILY+'", Product="'+product+'", PackageCode="'+package_code+'", Version="'+version+'", PackageSha="'+digest(msi.read_bytes())+'"; internal const long Size='+str(size)+'L; }'
     (work/'Identity.cs').write_text(identity,encoding='ascii')
 
     exe = work / filename

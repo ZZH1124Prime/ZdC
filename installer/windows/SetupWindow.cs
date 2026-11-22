@@ -183,9 +183,13 @@ partial class SetupWindow : Window
         Buttons(ActionButton("重试",Begin,true),ActionButton("关闭",Close));
     }
     private static int ErrorNumber(Exception e) => e is Win32Exception w ? w.NativeErrorCode : e.HResult & 0xffff;
-    private void Fault(int code,Action retry)
+    private void Fault(int code,Action retry,string logPath=null)
     {
         exitCode=code;status.Text=(updating?"更新失败":"安装失败")+"　错误代码 "+code;
+        if (logPath != null && File.Exists(logPath)) {
+            status.Text += Environment.NewLine + logPath;
+            SizeToContent = SizeToContent.Height;
+        }
         progress.Visibility=Visibility.Hidden;Buttons(ActionButton("重试",retry,true),ActionButton("关闭",Close));
     }
     private async void Begin()
@@ -201,21 +205,23 @@ partial class SetupWindow : Window
               Problem("请选择有效的安装位置。");return;
           } catch(Exception x){Fault(ErrorNumber(x),Begin);return;}
         bool shortcut=desktop.IsChecked==true;
+        string logPath=null;
+        SizeToContent=SizeToContent.Manual;
         var owner=new WindowInteropHelper(this).Handle;busy=true;Editable(false);
         cancellation=new CancellationTokenSource();
         var cancel=ActionButton("取消",RequestCancellation);Buttons(cancel);
         status.Text=updating?"正在更新 ZdC…":"正在安装 ZdC…";progress.Value=0;progress.Visibility=Visibility.Visible;
         try {
             var reporter=new Progress<int>(n=>{if(busy)progress.Value=n;});
-            uint result=await Task.Run(()=>InstallEngine.Apply(existing,path,shortcut,owner,reporter,cancellation.Token));
+            uint result=await Task.Run(()=>InstallEngine.Apply(existing,path,shortcut,owner,reporter,cancellation.Token,out logPath));
             if(result==0 || result==3010) {
                 exitCode=(int)result;progress.Value=100;status.Text=updating?"更新完成":"安装完成";
                 Buttons(ActionButton("完成",Close,true));
             } else if(result==1602 && cancellation.IsCancellationRequested){exitCode=1602;busy=false;Close();}
             else if(result==112 || result==39){exitCode=(int)result;Problem("磁盘空间不足，请选择其他位置。");}
-            else {Editable(true);Fault((int)result,Begin);}
+            else {Editable(true);Fault((int)result,Begin,logPath);}
         } catch(InstallEngine.AppInUseException){Problem("请先退出 ZdC，再继续。");}
-          catch(Exception x){Editable(true);Fault(ErrorNumber(x),Begin);}
+          catch(Exception x){Editable(true);Fault(ErrorNumber(x),Begin,logPath);}
         finally {busy=false;cancellation.Dispose();cancellation=null;}
     }
     private void RequestCancellation()

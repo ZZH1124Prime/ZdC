@@ -29,6 +29,27 @@ internal static class InstallEngine
     [DllImport("msi.dll", ExactSpelling = true)]
     private static extern uint MsiSetInternalUI(uint level, ref IntPtr owner);
 
+    [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern uint MsiEnableLogW(uint mode, string path, uint attributes);
+
+    // The installer runs a single transaction at a time. This API affects only its calling process.
+    private static string EnableInstallLog()
+    {
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ZdC", "diagnostics", "installer");
+            Directory.CreateDirectory(directory);
+            var name = DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N") + ".log";
+            var path = Path.Combine(directory, name);
+            const uint throughVerbose = (1u << 13) - 1, flushEachLine = 2;
+            return MsiEnableLogW(throughVerbose, path, flushEachLine) == 0 ? path : null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (System.Security.SecurityException) { return null; }
+    }
+
     internal sealed class AppInUseException : Exception { }
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int MessageHandler(IntPtr context, uint type, uint record);
@@ -176,9 +197,50 @@ internal static class InstallEngine
         return properties;
     }
 
-    /// <summary>Installs the pinned embedded database through Windows Installer. The native engine owns elevation and rollback.</summary>
-    internal static uint Apply(Installed existing, string path, bool desktop, IntPtr owner, IProgress<int> progress, CancellationToken cancellation)
+    private static void VerifyPackage(Stream stream)
     {
+        using (var sha = SHA256.Create())
+            if (!String.Equals(BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", ""), Identity.PackageSha,
+                StringComparison.Ordinal)) throw new Win32Exception(1620);
+    }
+
+    /// <summary>Publishes complete media atomically and holds its verified bytes read-only for the native transaction.</summary>
+    private static FileStream OpenSource(string source)
+    {
+        if (!File.Exists(source))
+        {
+            var directory = Directory.CreateDirectory(Path.GetDirectoryName(source));
+            var temporary = Path.Combine(directory.FullName, Guid.NewGuid().ToString("N") + ".tmp");
+            bool owned = false;
+            try
+            {
+                using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                {
+                    owned = true;
+                    using (var input = Assembly.GetExecutingAssembly().GetManifestResourceStream("ZdC.msi"))
+                        input.CopyTo(output);
+                    output.Flush(true);
+                    output.Position = 0;
+                    VerifyPackage(output);
+                }
+                try { File.Move(temporary, source); owned = false; }
+                catch (IOException) when (File.Exists(source)) { }
+            }
+            finally
+            {
+                if (owned) File.Delete(temporary);
+            }
+        }
+
+        var guard = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.Read);
+        try { VerifyPackage(guard); return guard; }
+        catch { guard.Dispose(); throw; }
+    }
+
+    /// <summary>Installs the pinned embedded database through Windows Installer. The native engine owns elevation and rollback.</summary>
+    internal static uint Apply(Installed existing, string path, bool desktop, IntPtr owner, IProgress<int> progress, CancellationToken cancellation, out string logPath)
+    {
+        logPath = null;
         if(cancellation.IsCancellationRequested) return 1602;
         var now = Find();
         if ((existing == null) != (now == null) || (now != null && (!String.Equals(existing.Code,now.Code,StringComparison.OrdinalIgnoreCase) ||
@@ -187,42 +249,32 @@ internal static class InstallEngine
         if (now != null && Version.Parse(now.Version) > Version.Parse(Identity.Version)) return 1638;
         path = CheckDirectory(path,now);
         if (AppRunning()) throw new AppInUseException();
-        string source = Path.Combine(Path.GetTempPath(),"ZdC-"+Guid.NewGuid().ToString("N")+".msi");
-        bool owned = false;
-        try
+        string source = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ZdC", Guid.Parse(Identity.PackageCode).ToString("N"), "ZdC.msi");
+        using (OpenSource(source))
         {
-            using (var output = new FileStream(source,FileMode.CreateNew,FileAccess.Write,FileShare.None))
-            using (var input = Assembly.GetExecutingAssembly().GetManifestResourceStream("ZdC.msi"))
-            { owned = true; input.CopyTo(output); output.Flush(true); }
-            using (var guard = File.Open(source,FileMode.Open,FileAccess.Read,FileShare.Read))
-            using (var hash = SHA256.Create())
+            string properties = InstallProperties(now, path, desktop);
+            var previousOwner=owner;
+            var previousLevel=MsiSetInternalUI(2u | 0x200u, ref previousOwner);
+            var meter=new Meter(progress,cancellation);
+            MessageHandler handler=meter.OnMessage;
+            bool installedHandler=false;
+            try
             {
-                if (!String.Equals(BitConverter.ToString(hash.ComputeHash(guard)).Replace("-",""),Identity.PackageSha,StringComparison.Ordinal)) return 1620;
-                string properties = InstallProperties(now, path, desktop);
-                var previousOwner=owner;
-                var previousLevel=MsiSetInternalUI(2u | 0x200u, ref previousOwner);
-                var meter=new Meter(progress,cancellation);
-                MessageHandler handler=meter.OnMessage;
-                bool installedHandler=false;
-                try
-                {
-                    var registration=MsiSetExternalUIRecord(handler,(1u<<9)|(1u<<10),IntPtr.Zero,out _);
-                    if(registration!=0)return registration;
-                    installedHandler=true;
-                    if(cancellation.IsCancellationRequested)return 1602;
-                    return MsiInstallProductW(source,properties);
-                }
-                finally
-                {
-                    if(installedHandler)MsiSetExternalUIRecord(null,0,IntPtr.Zero,out _);
-                    MsiSetInternalUI(previousLevel,ref previousOwner);
-                    GC.KeepAlive(handler);
-                }
+                var registration=MsiSetExternalUIRecord(handler,(1u<<9)|(1u<<10),IntPtr.Zero,out _);
+                if(registration!=0)return registration;
+                installedHandler=true;
+                if(cancellation.IsCancellationRequested)return 1602;
+                logPath = EnableInstallLog();
+                return MsiInstallProductW(source,properties);
             }
-        }
-        finally
-        {
-            if (owned) try { File.Delete(source); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            finally
+            {
+                if(logPath != null) MsiEnableLogW(0, null, 0);
+                if(installedHandler)MsiSetExternalUIRecord(null,0,IntPtr.Zero,out _);
+                MsiSetInternalUI(previousLevel,ref previousOwner);
+                GC.KeepAlive(handler);
+            }
         }
     }
 }
