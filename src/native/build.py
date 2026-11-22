@@ -15,6 +15,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 DETOURS = REPO / 'third_party' / 'Detours'
@@ -62,7 +66,7 @@ def vcvars_path(arch: str) -> Path:
 def compile(arch: str, workdir: Path, arguments: str) -> None:
     script = vcvars_path(arch)
     command = f'call "{script}" >nul && cl {COMMON} {arguments}'
-    subprocess.run(['cmd', '/c', command], cwd=workdir, check=True)
+    subprocess.run(command, cwd=workdir, check=True, shell=True)
 
 
 def main() -> int:
