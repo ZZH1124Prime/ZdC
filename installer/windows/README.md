@@ -18,7 +18,9 @@ git submodule update --init third_party/Detours
 dotnet tool install --global wix --version 5.0.2
 ~~~
 
-> WiX 7 起要求接受 OSMF 收费许可，因此这里固定在免费且稳定的 WiX 5.0.2。
+> OSMF 费用自 WiX v6 引入（年收入超过阈值的组织需要赞助）；WiX v7 起强制接受
+> EULA（`wix eula accept wix7` 或每条命令加 `-acceptEula wix7`）。因此这里固定在免费
+> 且稳定的 WiX 5.0.2。
 > 如果机器上装过其他版本的 wix 全局工具，先 `dotnet tool uninstall --global wix` 再按上面的版本安装。
 
 ## 构建
@@ -65,6 +67,8 @@ ZdC-Setup-<版本>-Windows-x64-<提交前七位>[-dirty].receipt.txt
 
 ## 安装与升级
 
+- 安装界面提供“关闭窗口后最小化到托盘”（默认勾选；更新安装时沿用当前偏好）。选择结果写入
+  `%LOCALAPPDATA%\ZdC\close-to-tray`，应用启动时按它恢复；之后可在应用内齿轮菜单随时修改。
 - 安装器启动后会检查目标机 .NET 9 桌面运行时、ZdC 是否在运行、安装目录是否合法；
 - MSI 采用 per-machine 安装（`Program Files\ZdC`）、固定 UpgradeCode，ProductCode 由版本推导，
   PackageCode 每次构建由 WiX 新建；
