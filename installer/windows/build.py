@@ -24,6 +24,7 @@ Visual Studio 2022 C++ tools, Python 3.10+, 7-Zip and WiX 5:
     dotnet tool install --global wix --version 5.0.2
 """
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -86,6 +87,13 @@ def run(arguments, cwd=None, capture=False):
 
 def git(*arguments) -> str:
     return run(['git', '-C', str(REPO), *arguments], capture=True)
+
+
+def powershell(script: str, cwd=None) -> str:
+    executable = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+    return run([str(executable), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+               cwd=cwd, capture=True)
 
 
 def sha256(path: Path) -> str:
@@ -193,7 +201,6 @@ def verify_payload(payload: Path, version: str, commit: str) -> dict:
     for name in NATIVE_FILES:
         if sha256(payload / name) != sha256(NATIVE_OUT / name):
             fail(f'载荷中的原生文件与本次编译结果不一致：{name}')
-    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     command = (
         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
         "$rows = foreach ($name in 'ZdC.exe','ZdC.dll') { "
@@ -201,8 +208,7 @@ def verify_payload(payload: Path, version: str, commit: str) -> dict:
         "[pscustomobject]@{Name=$name; Numeric=@($v.FileMajorPart,$v.FileMinorPart,$v.FileBuildPart); "
         "Product=$v.ProductVersion} }; ConvertTo-Json -Compress -InputObject @($rows)"
     )
-    rows = json.loads(run([str(powershell), '-NoProfile', '-NonInteractive', '-Command', command],
-                          cwd=payload, capture=True))
+    rows = json.loads(powershell(command, cwd=payload))
     expected = tuple(map(int, version.split('.')))
     for row in rows:
         product, _, metadata = (row['Product'] or '').partition('+')
@@ -263,20 +269,18 @@ def build_msi(work: Path, payload: Path, version: str, product: str) -> Path:
 
 
 def msi_identity(msi: Path) -> dict:
-    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     escaped = str(msi).replace("'", "''")
     command = (
         "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
         f"$i=New-Object -ComObject WindowsInstaller.Installer; $db=$i.OpenDatabase('{escaped}',0); "
         "$si=$db.SummaryInformation(0); $props=@{}; "
-        "$v=$db.OpenView(\"SELECT `Property`,`Value` FROM `Property`\"); $v.Execute(); "
+        "$v=$db.OpenView('SELECT `Property`,`Value` FROM `Property`'); $v.Execute(); "
         "while($r=$v.Fetch()){ $props[$r.StringData(1)]=$r.StringData(2) }; $v.Close(); "
         "[pscustomobject]@{ProductCode=$props['ProductCode']; ProductVersion=$props['ProductVersion']; "
         "UpgradeCode=$props['UpgradeCode']; PackageCode=$si.Property(9); Template=$si.Property(7)} "
         '| ConvertTo-Json -Compress'
     )
-    return json.loads(run([str(powershell), '-NoProfile', '-NonInteractive', '-Command', command],
-                          capture=True))
+    return json.loads(powershell(command))
 
 
 def verify_msi(work: Path, msi: Path, payload: Path, version: str, product: str):
