@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 using ZdC.Core;
@@ -14,14 +15,19 @@ namespace ZdC.App;
 public partial class MainWindow
 {
     private const int TrayTooltipHideDistance = 160;
+    private const int TrayTooltipHoverDelayMs = 1000;
+    private const int TrayTooltipHoverTolerance = 60;
 
     private Forms.NotifyIcon? _trayIcon;
-    private Forms.ContextMenuStrip? _trayMenu;
+    private ContextMenu? _trayMenu;
     private Task? _shutdownTask;
     private TrayTooltip? _trayTooltip;
     private DispatcherTimer? _trayTooltipTimer;
+    private DispatcherTimer? _trayTooltipDelay;
+    private System.Drawing.Point _trayHoverOrigin;
     private System.Drawing.Point _trayTooltipAnchor;
     private bool _trayTooltipLoading;
+    private bool _trayTooltipPending;
 
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
@@ -50,10 +56,10 @@ public partial class MainWindow
             {
                 var icon = System.Drawing.Icon.ExtractIcon(Path.Combine(AppContext.BaseDirectory, "ZdC.exe"), 0, true)
                     ?? throw new Win32Exception(1813);
-                _trayMenu = CreateTrayMenu();
-                _trayIcon = new Forms.NotifyIcon { Icon = icon, ContextMenuStrip = _trayMenu };
+                _trayIcon = new Forms.NotifyIcon { Icon = icon };
                 _trayIcon.MouseClick += Tray_MouseClick;
                 _trayIcon.MouseMove += Tray_MouseMove;
+                _trayIcon.MouseUp += Tray_MouseUp;
             }
             _trayIcon.Visible = true;
             Hide();
@@ -64,26 +70,10 @@ public partial class MainWindow
         }
     }
 
-    private Forms.ContextMenuStrip CreateTrayMenu()
-    {
-        var menu = new Forms.ContextMenuStrip();
-        var open = new Forms.ToolStripMenuItem("打开主界面")
-        {
-            Font = new System.Drawing.Font(System.Drawing.SystemFonts.MenuFont, System.Drawing.FontStyle.Bold),
-        };
-        open.Click += (_, _) => ShowFromTray();
-        var exit = new Forms.ToolStripMenuItem("退出");
-        exit.Click += (_, _) => ExitFromTray();
-        menu.Items.Add(open);
-        menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add(exit);
-        menu.Opening += (_, _) => HideTrayTooltip();
-        return menu;
-    }
-
     private void ShowFromTray()
     {
         HideTrayTooltip();
+        if (_trayMenu is not null) _trayMenu.IsOpen = false;
         if (_shutdownCompleted) return;
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
@@ -94,6 +84,7 @@ public partial class MainWindow
     private void ExitFromTray()
     {
         HideTrayTooltip();
+        if (_trayMenu is not null) _trayMenu.IsOpen = false;
         if (_shutdownCompleted) return;
         if (_busy || _applicationOperations.Count > 0)
         {
@@ -108,23 +99,73 @@ public partial class MainWindow
 
     private void Tray_MouseClick(object? sender, Forms.MouseEventArgs e)
     {
-        HideTrayTooltip();
-        if (e.Button != Forms.MouseButtons.Left || _shutdownCompleted) return;
+        if (e.Button != Forms.MouseButtons.Left) return;
         ShowFromTray();
+    }
+
+    private void Tray_MouseUp(object? sender, Forms.MouseEventArgs e)
+    {
+        if (e.Button != Forms.MouseButtons.Right || _shutdownCompleted) return;
+        HideTrayTooltip();
+        var menu = _trayMenu ??= CreateTrayMenu();
+        TrayMenu.Place(menu, this, Forms.Cursor.Position);
+        menu.IsOpen = true;
+    }
+
+    private ContextMenu CreateTrayMenu()
+    {
+        var menu = TrayMenu.Create();
+        if (menu.Items.OfType<MenuItem>().FirstOrDefault() is { } open)
+            open.Click += (_, _) => { menu.IsOpen = false; ShowFromTray(); };
+        if (menu.Items.OfType<MenuItem>().LastOrDefault() is { } exit)
+            exit.Click += (_, _) => { menu.IsOpen = false; ExitFromTray(); };
+        // 打开后按实际尺寸重新修正位置，避免贴边时超出屏幕。
+        menu.Opened += (_, _) => TrayMenu.Place(menu, this, Forms.Cursor.Position);
+        return menu;
     }
 
     private void Tray_MouseMove(object? sender, Forms.MouseEventArgs e)
     {
         if (_shutdownCompleted || _trayIcon is null || !_trayIcon.Visible) return;
+        if (_trayMenu is { IsOpen: true }) return;
         if (_trayTooltip is { IsVisible: true })
         {
             // 鼠标仍停在图标上时不断刷新锚点，避免提示窗被误判为“已离开”。
             _trayTooltipAnchor = Forms.Cursor.Position;
             return;
         }
-        if (_trayTooltipLoading) return;
+        if (_trayTooltipLoading || _trayTooltipPending) return;
+        BeginTrayTooltipDelay();
+    }
+
+    private void BeginTrayTooltipDelay()
+    {
+        _trayHoverOrigin = Forms.Cursor.Position;
+        _trayTooltipDelay ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(TrayTooltipHoverDelayMs) };
+        _trayTooltipDelay.Stop();
+        _trayTooltipDelay.Tick -= TrayTooltipDelay_Tick;
+        _trayTooltipDelay.Tick += TrayTooltipDelay_Tick;
+        _trayTooltipDelay.Start();
+        _trayTooltipPending = true;
+    }
+
+    private void TrayTooltipDelay_Tick(object? sender, EventArgs e)
+    {
+        CancelTrayTooltipDelay();
+        if (_shutdownCompleted || _trayIcon is not { Visible: true } || _trayTooltipLoading) return;
+        var cursor = Forms.Cursor.Position;
+        if (Math.Abs(cursor.X - _trayHoverOrigin.X) > TrayTooltipHoverTolerance ||
+            Math.Abs(cursor.Y - _trayHoverOrigin.Y) > TrayTooltipHoverTolerance) return;
         _trayTooltipLoading = true;
         _ = ShowTrayTooltipAsync();
+    }
+
+    private void CancelTrayTooltipDelay()
+    {
+        _trayTooltipPending = false;
+        if (_trayTooltipDelay is null) return;
+        _trayTooltipDelay.Stop();
+        _trayTooltipDelay.Tick -= TrayTooltipDelay_Tick;
     }
 
     private async Task ShowTrayTooltipAsync()
@@ -165,6 +206,7 @@ public partial class MainWindow
 
     private void HideTrayTooltip()
     {
+        CancelTrayTooltipDelay();
         _trayTooltipTimer?.Stop();
         if (_trayTooltip is { IsVisible: true }) _trayTooltip.Hide();
     }
@@ -199,17 +241,18 @@ public partial class MainWindow
         finally
         {
             HideTrayTooltip();
+            if (_trayMenu is not null)
+            {
+                _trayMenu.IsOpen = false;
+                _trayMenu = null;
+            }
             if (_trayTooltip is not null)
             {
                 _trayTooltip.Close();
                 _trayTooltip = null;
             }
             _trayTooltipTimer = null;
-            if (_trayMenu is not null)
-            {
-                _trayMenu.Dispose();
-                _trayMenu = null;
-            }
+            _trayTooltipDelay = null;
             if (_trayIcon is not null)
             {
                 var icon = _trayIcon.Icon;

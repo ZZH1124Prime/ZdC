@@ -7,7 +7,6 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
-using Microsoft.Win32;
 
 namespace ZdC.App;
 
@@ -96,7 +95,7 @@ internal sealed class TrayTooltip : Window
 
     private void ApplyTheme()
     {
-        var light = IsLightTheme();
+        var light = TrayTheme.IsLight();
         var background = new SolidColorBrush(light ? Color.FromRgb(0xF9, 0xF9, 0xF9) : Color.FromRgb(0x2B, 0x2B, 0x2B));
         var border = new SolidColorBrush(light ? Color.FromRgb(0xE5, 0xE5, 0xE5) : Color.FromRgb(0x3D, 0x3D, 0x3D));
         var foreground = new SolidColorBrush(light ? Color.FromRgb(0x1A, 0x1A, 0x1A) : Color.FromRgb(0xF2, 0xF2, 0xF2));
@@ -106,21 +105,6 @@ internal sealed class TrayTooltip : Window
         _surface.Background = background;
         _surface.BorderBrush = border;
         _text.Foreground = foreground;
-    }
-
-    private static bool IsLightTheme()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            var value = key?.GetValue("AppsUseLightTheme");
-            return value is not int theme || theme != 0;
-        }
-        catch (Exception)
-        {
-            return true;
-        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
