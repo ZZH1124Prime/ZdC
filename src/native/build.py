@@ -1,4 +1,4 @@
-﻿"""Build the ZdC native Windows binaries with the Visual C++ toolchain.
+"""Build the ZdC native Windows binaries with the Visual C++ toolchain.
 
 Usage (from the repository root):
     python -B src/native/build.py [--output artifacts/native]
@@ -10,7 +10,6 @@ The script locates Visual Studio through vswhere, imports the x64/x86
 environment with vcvars, and writes all outputs into the output directory.
 """
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -29,6 +28,7 @@ OUTPUTS = (
 )
 
 COMMON = '/nologo /std:c++17 /utf-8 /EHsc /W4 /MT'
+VC_COMPONENT = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
 
 
 def vswhere_path() -> Path:
@@ -41,22 +41,21 @@ def vswhere_path() -> Path:
         if candidate.is_file():
             return candidate
     raise RuntimeError(
-        '鎵句笉鍒?vswhere.exe銆傝瀹夎 Visual Studio 2022锛堟垨 Build Tools锛夊苟鍕鹃€?
-        '鈥滀娇鐢?C++ 鐨勬闈㈠紑鍙戔€濆拰 Windows SDK銆?)
+        '找不到 vswhere.exe。请安装 Visual Studio 2022（或 Build Tools），'
+        '并勾选“使用 C++ 的桌面开发”和 Windows SDK。')
 
 
 def vcvars_path(arch: str) -> Path:
     query = [
         str(vswhere_path()), '-latest', '-products', '*',
-        '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-        '-property', 'installationPath',
+        '-requires', VC_COMPONENT, '-property', 'installationPath',
     ]
     installation = subprocess.check_output(query, text=True).strip()
     if not installation:
-        raise RuntimeError('娌℃湁鎵惧埌甯?C++ 宸ュ叿鐨?Visual Studio 瀹夎銆?)
+        raise RuntimeError('没有找到带 C++ 工具的 Visual Studio 安装。')
     script = Path(installation) / 'VC' / 'Auxiliary' / 'Build' / f'vcvars{arch}.bat'
     if not script.is_file():
-        raise RuntimeError(f'鎵句笉鍒?{script}銆傝瀹夎 Visual Studio C++ 妗岄潰寮€鍙戠粍浠躲€?)
+        raise RuntimeError(f'找不到 {script}。请安装 Visual Studio C++ 桌面开发组件。')
     return script
 
 
@@ -74,7 +73,7 @@ def main() -> int:
 
     if not (DETOURS / 'include' / 'detours.h').is_file() or not (DETOURS / 'lib.X64' / 'detours.lib').is_file():
         raise SystemExit(
-            'third_party/Detours 鏈鍑恒€傚厛鎵ц锛歡it submodule update --init third_party/Detours')
+            'third_party/Detours 未检出。先执行：git submodule update --init third_party/Detours')
 
     include = DETOURS / 'include'
     lib64 = DETOURS / 'lib.X64' / 'detours.lib'
@@ -97,10 +96,10 @@ def main() -> int:
 
     missing = [name for name in OUTPUTS if not (output / name).is_file()]
     if missing:
-        raise SystemExit('鍘熺敓鏋勫缓缂哄皯杈撳嚭锛? + ', '.join(missing))
+        raise SystemExit('原生构建缺少输出：' + ', '.join(missing))
     for name in OUTPUTS:
         print(f'  {name}  {(output / name).stat().st_size} bytes')
-    print(f'鍘熺敓浜岃繘鍒惰緭鍑虹洰褰曪細{output}')
+    print(f'原生二进制输出目录：{output}')
     return 0
 
 
