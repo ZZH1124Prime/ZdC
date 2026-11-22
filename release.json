@@ -9,6 +9,8 @@
   "title": "ZdC {version} — Windows x64",
   "notes": "artifacts/windows/RELEASE_NOTES-{version}.md",
   "platform": "auto",
+  "dry_run": false,
+  "force_build": false,
   "platforms": {
     "windows": {
       "build": ["python -B installer/windows/build.py"],

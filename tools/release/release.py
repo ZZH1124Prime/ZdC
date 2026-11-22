@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-"""Generic, cross-platform release helper.
+"""ZdC 一键发布脚本（跨平台）。
 
-A project describes itself in a JSON file (default: ``release.json`` in the
-repository root).  The same script then works for this repository on Windows
-and on Linux, and can be copied or referenced from other repositories.
+用法：先按需修改仓库根目录的 ``release.json``（版本号、tag 提交、发布说明等），
+然后在仓库根目录直接运行：
 
-Typical flow (from the repository root):
+    python tools/release/release.py
 
-    python tools/release/release.py plan
-    python tools/release/release.py build
-    python tools/release/release.py doctor
-    python tools/release/release.py tag --push --yes
-    python tools/release/release.py publish --yes
+脚本按顺序完成：检查工作区 → 按需构建 → 按需创建并推送 tag → 创建 GitHub Release
+并上传附件。已经存在且正确的构建产物、tag、Release 会自动跳过，因此可以重复运行。
 
-Run ``python tools/release/release.py --help`` for every command.
+调试时设置环境变量 ``RELEASE_DRY_RUN=1`` 只打印计划、不做任何修改。
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -28,334 +23,315 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+
+CONFIG_NAME = "release.json"
+RELEASE_API = "https://api.github.com"
+DRY_RUN_ENV = "RELEASE_DRY_RUN"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
+# ---------------------------------------------------------------------------
+# 基础工具
+# ---------------------------------------------------------------------------
+
 def log(message: str = "") -> None:
     print(message, flush=True)
 
 
-def fail(message: str, code: int = 1) -> "NoReturn":
+def fail(message: str) -> None:
     print(f"\n错误：{message}", file=sys.stderr, flush=True)
-    raise SystemExit(code)
+    raise SystemExit(1)
 
 
-def run(command, cwd: Path, check: bool = True, capture: bool = False):
-    if not capture:
-        log("> " + " ".join(str(part) for part in command))
+def run(command: list[str] | str, cwd: Path, check: bool = True,
+        capture: bool = False) -> str:
+    """运行命令。字符串命令用于构建步骤（交给 shell），列表用于 git 等固定命令。"""
+    display = command if isinstance(command, str) else " ".join(command)
+    log(f"> {display}")
     try:
         result = subprocess.run(
-            command, cwd=cwd, text=True, capture_output=capture, check=check
+            command, cwd=cwd, text=True, capture_output=capture, check=check,
+            shell=isinstance(command, str),
         )
     except FileNotFoundError:
-        fail(f"找不到可执行文件：{command[0]}")
+        fail(f"找不到可执行文件：{display}")
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip() if capture else ""
-        fail(f"命令失败（{error.returncode}）：{' '.join(map(str, command))}"
-             + (f"\n{detail}" if detail else ""))
-    return result.stdout.strip() if capture else None
+        fail(f"命令失败（{error.returncode}）：{display}" + (f"\n{detail}" if detail else ""))
+    return (result.stdout or "").strip() if capture else ""
 
 
-def git(repo: Path, *arguments: str, capture: bool = True) -> str:
-    return run(["git", *arguments], cwd=repo, capture=capture) or ""
-
-
-def render(template: str, values: dict) -> str:
-    try:
-        return template.format(**values)
-    except KeyError as error:
-        fail(f"描述文件占位符缺少值：{{{error.args[0]}}}")
+def git(repo: Path, *arguments: str) -> str:
+    return run(["git", *arguments], cwd=repo, capture=True)
 
 
 def repository_root() -> Path:
-    location = Path.cwd()
     if shutil.which("git") is None:
         fail("找不到 git。")
-    top = run(["git", "rev-parse", "--show-toplevel"], cwd=location, capture=True)
+    top = run(["git", "rev-parse", "--show-toplevel"], cwd=Path.cwd(), capture=True)
     if not top:
         fail("当前目录不在 Git 仓库中。")
     return Path(top).resolve()
 
 
-class Project:
-    def __init__(self, repo: Path, config_path: Path, config: dict, platform: str):
-        self.repo = repo
-        self.config_path = config_path
-        self.config = config
-        self.platform = platform
-        self.version = str(config.get("version", "")).strip()
-        if not self.version:
-            fail("描述文件缺少 version。")
-        self.tag = render(str(config.get("tag", "v{version}")), {"version": self.version})
-        self.title = render(str(config.get("title", "{project} {version}")), {
-            "project": config.get("project", repo.name), "version": self.version})
-        notes_relative = (render(str(config.get("notes", "")), {"version": self.version})
-                          if config.get("notes") else "")
-        self.notes = self._path(notes_relative)
-        self.platforms = config.get("platforms", {})
-        if self.platform not in self.platforms:
-            fail(f"描述文件没有平台 {self.platform!r} 的配置：{sorted(self.platforms)}")
-        self.settings = self.platforms[self.platform] or {}
+def expand(template: str, values: dict[str, str]) -> str:
+    try:
+        return template.format(**values)
+    except KeyError as error:
+        fail(f"release.json 的占位符缺少值：{{{error.args[0]}}}")
 
-    def _path(self, relative: str) -> Path:
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest().upper()
+
+
+def is_true(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ---------------------------------------------------------------------------
+# 发布描述
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Release:
+    """release.json 解析后的发布描述。"""
+
+    repo: Path
+    config_path: Path
+    data: dict
+
+    def __post_init__(self) -> None:
+        self.version = str(self.data.get("version", "")).strip()
+        if not self.version:
+            fail("release.json 缺少 version。")
+        values = {"version": self.version}
+        self.project = str(self.data.get("project", self.repo.name))
+        self.tag = expand(str(self.data.get("tag", "v{version}")), values)
+        self.title = expand(str(self.data.get("title", "{project} {version}")),
+                            {**values, "project": self.project})
+        self.branch = str(self.data.get("branch", "master"))
+        self.remote = str(self.data.get("remote", "origin"))
+        self.repository = str(self.data.get("repo", "")).strip()
+        self.notes = self._path(expand(str(self.data["notes"]), values)
+                                if self.data.get("notes") else "")
+        self.tag_commit_override = str(self.data.get("tag_commit", "") or "HEAD")
+        self.force_build = bool(self.data.get("force_build", False))
+        self.force_tag = bool(self.data.get("force_tag", False))
+        self.dry_run_config = bool(self.data.get("dry_run", False))
+        self.release_options = dict(self.data.get("release", {}))
+
+        platform = str(self.data.get("platform", "auto"))
+        if platform == "auto":
+            platform = "windows" if sys.platform.startswith("win") else "linux"
+        self.platform = platform
+        platforms = self.data.get("platforms", {})
+        if platform not in platforms:
+            fail(f"release.json 没有平台 {platform!r} 的配置（可用：{sorted(platforms)}）")
+        self.settings = platforms[platform] or {}
+
+    def _path(self, relative: str) -> Path | None:
         return (self.repo / relative).resolve() if relative else None
 
-    def expand(self, patterns) -> list[Path]:
-        result: list[Path] = []
+    @property
+    def dry_run(self) -> bool:
+        return self.dry_run_config or is_true(os.environ.get(DRY_RUN_ENV))
+
+    def tag_commit(self) -> str:
+        return git(self.repo, "rev-parse", "--verify",
+                   f"{self.tag_commit_override}^{{commit}}").strip()
+
+    def find(self, patterns: list[str] | None) -> list[Path]:
+        found: list[Path] = []
         for pattern in patterns or []:
-            relative = render(str(pattern), {"version": self.version})
+            relative = expand(str(pattern), {"version": self.version})
             matches = sorted(self.repo.glob(relative))
-            for match in matches:
-                if match.is_file() and match not in result:
-                    result.append(match)
             if not matches:
                 log(f"  警告：没有匹配到附件：{relative}")
-        return result
+            found.extend(item for item in matches if item.is_file() and item not in found)
+        return found
 
     def assets(self) -> list[Path]:
-        files = self.expand(self.settings.get("assets"))
-        files += self.expand(self.settings.get("extra_assets"))
-        return files
+        return self.find(self.settings.get("assets")) + self.find(self.settings.get("extra_assets"))
 
-    def notes_text(self) -> str:
-        if not self.notes:
-            return ""
-        if not self.notes.is_file():
-            fail(f"发布说明文件不存在：{self.notes}")
-        return self.notes.read_text(encoding="utf-8")
-
-    def sha256sums_path(self) -> Path:
+    def checksums_path(self) -> Path | None:
         relative = self.settings.get("sha256sums")
-        if not relative:
-            return None
-        return self._path(render(str(relative), {"version": self.version}))
-
-    def write_sha256sums(self) -> Path:
-        target = self.sha256sums_path()
-        if target is None:
-            return None
-        files = [item for item in self.expand(self.settings.get("assets")) if item.is_file()]
-        lines = []
-        for item in files:
-            digest = hashlib.sha256(item.read_bytes()).hexdigest().upper()
-            lines.append(f"{digest}  {item.name}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("\n".join(lines) + "\n", encoding="ascii")
-        log(f"写入校验文件：{target}")
-        return target
+        return self._path(expand(str(relative), {"version": self.version})) if relative else None
 
     def receipt_commit(self) -> str:
-        relative = render(str(self.settings.get("receipt", "")), {"version": self.version})
-        pattern = self.settings.get("receipt_commit_pattern", r"源码提交：([0-9a-f]{40})")
-        if not relative:
+        """从构建回执里读出源码提交，用于确认产物和 tag 指向同一提交。"""
+        pattern = self.settings.get("receipt")
+        regex = self.settings.get("receipt_commit_pattern", r"源码提交：([0-9a-f]{40})")
+        if not pattern:
             return ""
-        matches = sorted(self.repo.glob(relative))
+        matches = sorted(self.repo.glob(expand(str(pattern), {"version": self.version})))
         if not matches:
             return ""
-        text = matches[0].read_text(encoding="utf-8", errors="replace")
-        found = re.search(pattern, text)
+        found = re.search(regex, matches[0].read_text(encoding="utf-8", errors="replace"))
         return found.group(1) if found else ""
 
-    def tag_commit(self, override: str = "") -> str:
-        value = override or str(self.config.get("tag_commit", "") or "HEAD")
-        resolved = git(self.repo, "rev-parse", "--verify", f"{value}^{{commit}}").strip()
-        if not resolved:
-            fail(f"无法解析 tag_commit：{value}")
-        return resolved
+    def notes_text(self) -> str:
+        if self.notes is None:
+            fail("release.json 没有配置 notes（发布说明文件）。")
+        if not self.notes.is_file():
+            fail(f"发布说明文件不存在：{self.notes}")
+        text = self.notes.read_text(encoding="utf-8").strip()
+        if not text:
+            fail("发布说明文件为空。")
+        return text
 
 
-def load_project(repo: Path, config_name: str, platform: str) -> Project:
-    config_path = Path(config_name)
-    if not config_path.is_absolute():
-        config_path = repo / config_name
-    if not config_path.is_file():
-        fail(f"描述文件不存在：{config_path}")
+def load_release(repo: Path) -> Release:
+    path = repo / CONFIG_NAME
+    if not path.is_file():
+        fail(f"找不到 {path}。")
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as error:
-        fail(f"描述文件不是合法 JSON：{error}")
-    selected = platform
-    if selected == "auto":
-        selected = "windows" if sys.platform.startswith("win") else "linux"
-    return Project(repo, config_path, config, selected)
+        fail(f"release.json 不是合法 JSON：{error}")
+    return Release(repo, path, data)
 
 
-def check_clean(project: Project) -> None:
-    status = git(project.repo, "status", "--porcelain", "--untracked-files=normal")
+# ---------------------------------------------------------------------------
+# 仓库检查
+# ---------------------------------------------------------------------------
+
+def check_worktree(release: Release) -> None:
+    status = git(release.repo, "status", "--porcelain", "--untracked-files=normal")
     if status.strip():
         fail("工作区有未提交改动，先提交再发布：\n" + status)
+    branch = git(release.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    if release.branch and branch != release.branch:
+        fail(f"当前分支 {branch!r} 与 release.json 的 {release.branch!r} 不一致。")
+    log(f"  工作区干净，分支 {branch}")
 
 
-def check_tag(project: Project, remote_tag: bool = False) -> None:
-    local = git(project.repo, "tag", "--list", project.tag)
-    if not local.strip():
-        fail(f"本地标签不存在：{project.tag}，先运行 tag。")
-    if remote_tag:
-        remote = git(project.repo, "ls-remote", "--tags", project.config.get("remote", "origin"),
-                     f"refs/tags/{project.tag}")
-        if not remote.strip():
-            fail(f"远端还没有标签 {project.tag}，先运行 tag --push。")
+def check_tag_commit(release: Release, commit: str) -> None:
+    run(["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=release.repo, capture=True)
+    receipt = release.receipt_commit()
+    if receipt and not commit.startswith(receipt) and not receipt.startswith(commit[:len(receipt)]):
+        fail(f"安装包回执的源码提交 {receipt} 与 tag_commit {commit} 不一致；"
+             "先确认产物或修改 release.json 的 tag_commit。")
+    log(f"  产物与 tag 提交一致：{commit[:12]}")
 
 
-def describe(project: Project) -> None:
-    log(f"项目：{project.config.get('project', project.repo.name)}")
-    log(f"仓库：{project.repo}")
-    log(f"描述：{project.config_path}")
-    log(f"平台：{project.platform}")
-    log(f"版本：{project.version}")
-    log(f"标签：{project.tag}")
-    log(f"标签提交：{project.tag_commit()}")
-    log(f"标题：{project.title}")
-    log(f"发布说明：{project.notes or '（无）'}")
-    build = project.settings.get("build") or []
-    log(f"构建命令：{build or '（无）'}")
-    assets = project.assets()
-    log(f"附件（{len(assets)}）：")
-    for item in assets:
-        log(f"  {item.relative_to(project.repo)}")
-    sums = project.sha256sums_path()
-    if sums is not None:
-        log(f"校验文件：{sums.relative_to(project.repo)}")
-    release = project.config.get("release", {})
-    log(f"发布选项：draft={release.get('draft', False)} "
-        f"prerelease={release.get('prerelease', False)} latest={release.get('latest', True)}")
+def check_tag(release: Release, commit: str, create: bool) -> None:
+    """确保 tag 存在且指向正确提交；需要时创建并推送。"""
+    existing = git(release.repo, "tag", "--list", release.tag).strip()
+    if existing:
+        target = git(release.repo, "rev-parse", f"{release.tag}^{{commit}}").strip()
+        if target != commit:
+            fail(f"标签 {release.tag} 已存在但指向 {target}，预期 {commit}。"
+                 "如需重新发布请升级版本号；不要强制改已公开的标签。")
+        log(f"  tag 已存在且指向正确提交，跳过创建")
+        return
+    if release.dry_run or not create:
+        log(f"  [计划] 创建并推送标签 {release.tag} -> {commit[:12]}")
+        return
+    git(release.repo, "tag", "-a", release.tag, "-m", f"{release.project} {release.version}",
+        commit, capture=False)
+    git(release.repo, "push", release.remote, release.tag, capture=False)
+    log(f"  已创建并推送标签 {release.tag}")
 
 
-def doctor(project: Project) -> None:
-    log("检查发布环境")
-    if not (project.repo / ".git").exists() and not git(project.repo, "rev-parse", "--git-dir"):
-        fail("不是 Git 仓库。")
-    check_clean(project)
-    log("  工作区干净")
-    branch = git(project.repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
-    expected = str(project.config.get("branch", "")).strip()
-    if expected and branch != expected:
-        fail(f"当前分支 {branch!r} 与描述文件里的 {expected!r} 不一致。")
-    log(f"  分支：{branch}")
-    remote = str(project.config.get("remote", "origin"))
-    url = git(project.repo, "remote", "get-url", remote, capture=True)
-    expected_repo = str(project.config.get("repo", "")).strip()
-    if expected_repo and expected_repo not in url:
-        log(f"  警告：remote {remote} 的地址 {url!r} 不含 {expected_repo!r}")
-    log(f"  远端：{url}")
+# ---------------------------------------------------------------------------
+# 构建与校验
+# ---------------------------------------------------------------------------
 
-    commit = project.tag_commit()
-    run(["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=project.repo, capture=True)
-    log(f"  标签提交：{commit}")
-
-    receipt = project.receipt_commit()
-    if receipt:
-        if not commit.startswith(receipt) and not receipt.startswith(commit[:len(receipt)]):
-            fail(f"安装包回执的源码提交 {receipt} 与标签提交 {commit} 不一致。")
-        log("  安装包回执与标签提交一致")
-    tag_local = git(project.repo, "tag", "--list", project.tag).strip()
-    log(f"  标签状态：{'已存在' if tag_local else '尚未创建'}")
-    if not project.notes:
-        log("  警告：未配置发布说明文件")
-    elif not project.notes.is_file():
-        fail(f"发布说明文件不存在：{project.notes}")
-    elif not project.notes_text().strip():
-        log("  警告：发布说明为空")
-    uploader = "gh" if shutil.which("gh") else (
-        "GitHub API" if (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")) else "缺失")
-    log(f"  发布工具：{uploader}")
-    if uploader == "缺失":
-        log("  警告：没有 gh 也没有 GH_TOKEN/GITHUB_TOKEN，publish 将无法上传。")
-
-
-def build(project: Project) -> None:
-    commands = project.settings.get("build") or []
+def build_if_needed(release: Release, commit: str) -> None:
+    assets = release.assets()
+    receipt = release.receipt_commit()
+    ready = bool(assets) and (not receipt or receipt == commit or commit.startswith(receipt))
+    if ready and not release.force_build:
+        log("  已存在匹配当前 tag 提交的构建产物，跳过构建")
+        return
+    commands = release.settings.get("build") or []
     if not commands:
-        log("描述文件没有配置构建命令，跳过。")
+        if not ready:
+            fail("缺少构建命令，也没有可用的构建产物。")
+        return
+    if release.dry_run:
+        log(f"  [计划] 运行构建命令：{commands}")
         return
     for command in commands:
-        log(f"\n[构建] {command}")
-        result = subprocess.run(command, cwd=project.repo, shell=True)
-        if result.returncode != 0:
-            fail(f"构建命令失败（{result.returncode}）：{command}")
-
-
-def create_tag(project: Project, push: bool, override: str, yes: bool) -> None:
-    check_clean(project)
-    commit = project.tag_commit(override)
-    existing = git(project.repo, "tag", "--list", project.tag).strip()
-    if existing:
-        fail(f"标签已存在：{project.tag}（指向 {existing}）。如需重新发布请升级版本号。")
-    log(f"将创建标签 {project.tag} -> {commit}")
-    if not yes:
-        fail("创建/推送标签属于发布动作，确认后加 --yes。")
-    git(project.repo, "tag", "-a", project.tag, "-m", f"{project.config.get('project', '')} {project.version}".strip(),
-        commit, capture=False)
-    log(f"已创建 {project.tag}")
-    if push:
-        git(project.repo, "push", project.config.get("remote", "origin"), project.tag, capture=False)
-        log(f"已推送 {project.tag}")
-
-
-def tool_available(name: str) -> bool:
-    return shutil.which(name) is not None
-
-
-def publish(project: Project, dry_run: bool, yes: bool, draft: bool | None,
-            prerelease: bool | None, latest: bool | None) -> None:
-    if dry_run:
-        log("--dry-run：只显示发布计划，不检查/修改仓库状态。")
-    else:
-        check_clean(project)
-        check_tag(project, remote_tag=True)
-    if not project.notes:
-        fail("descriptor 没有配置发布说明文件（notes）。")
-    notes = project.notes_text().strip()
-    if not notes:
-        fail("发布说明为空。")
-    sums = None if dry_run else project.write_sha256sums()
-    assets = project.assets()
-    if sums is not None and sums not in assets:
-        assets.append(sums)
+        log(f"  构建：{command}")
+        run(command, cwd=release.repo, capture=False)
+    assets = release.assets()
     if not assets:
-        fail("没有匹配到任何发布附件。")
-    for item in assets:
-        if not item.is_file():
-            fail(f"附件不存在：{item}")
-    release = project.config.get("release", {})
-    draft = release.get("draft", False) if draft is None else draft
-    prerelease = release.get("prerelease", False) if prerelease is None else prerelease
-    latest = release.get("latest", True) if latest is None else latest
-    tag = project.tag
-    log(f"发布 {tag}：{project.title}")
-    log(f"附件：{len(assets)} 个")
-    for item in assets:
-        log(f"  {item.relative_to(project.repo)}")
-    if dry_run:
-        log("\n--dry-run：只显示将要执行的动作，不上传。")
-        return
-    if not yes:
-        fail("上传 Release 属于发布动作，确认后加 --yes。")
+        fail("构建完成后仍没有匹配到发布附件。")
+    check_tag_commit(release, commit)
 
-    if tool_available("gh"):
-        command = ["gh", "release", "create", tag, *[str(item) for item in assets],
-                   "--title", project.title, "--notes-file", str(project.notes)]
-        if draft:
-            command.append("--draft")
-        if prerelease:
-            command.append("--prerelease")
-        command.append("--latest" if latest else "--latest=false")
-        run(command, cwd=project.repo)
-        log("Release 已创建（gh）。")
-        return
 
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+def write_checksums(release: Release) -> Path | None:
+    target = release.checksums_path()
+    if target is None:
+        return None
+    files = release.find(release.settings.get("assets"))
+    lines = [f"{sha256(item)}  {item.name}" for item in files]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="ascii")
+    log(f"  写入校验文件：{target.relative_to(release.repo)}")
+    return target
+
+
+# ---------------------------------------------------------------------------
+# GitHub Release
+# ---------------------------------------------------------------------------
+
+def gh_available() -> bool:
+    return shutil.which("gh") is not None
+
+
+def github_token() -> str:
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+
+
+def release_exists(release: Release) -> bool:
+    if gh_available():
+        result = subprocess.run(
+            ["gh", "release", "view", release.tag, "--json", "tagName"],
+            cwd=release.repo, text=True, capture_output=True,
+        )
+        return result.returncode == 0
+    token = github_token()
     if not token:
-        fail("没有 gh，也没有 GH_TOKEN/GITHUB_TOKEN。")
-    publish_api(project, assets, notes, draft, prerelease, latest, token)
+        return False
+    request = urllib.request.Request(
+        f"{RELEASE_API}/repos/{release.repository}/releases/tags/{release.tag}",
+        method="GET",
+    )
+    request.add_header("Authorization", f"Bearer {token}")
+    request.add_header("Accept", "application/vnd.github+json")
+    try:
+        with urllib.request.urlopen(request, timeout=30):
+            return True
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        fail(f"查询 Release 失败：{error.code}")
 
 
-def api_request(url: str, token: str, method: str = "GET", data: bytes | None = None,
-                content_type: str = "application/json"):
+def publish_with_gh(release: Release, assets: list[Path], notes: str) -> None:
+    command = ["gh", "release", "create", release.tag,
+               *[str(item) for item in assets],
+               "--title", release.title,
+               "--notes-file", str(release.notes)]
+    if release.release_options.get("draft"):
+        command.append("--draft")
+    if release.release_options.get("prerelease"):
+        command.append("--prerelease")
+    if release.release_options.get("latest", True):
+        command.append("--latest")
+    run(command, cwd=release.repo, capture=False)
+
+
+def api_request(url: str, token: str, method: str, data: bytes | None = None,
+                content_type: str = "application/json") -> str:
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", "application/vnd.github+json")
@@ -366,92 +342,96 @@ def api_request(url: str, token: str, method: str = "GET", data: bytes | None = 
         with urllib.request.urlopen(request, timeout=120) as response:
             return response.read().decode("utf-8")
     except urllib.error.HTTPError as error:
-        fail(f"GitHub API {method} {url} 失败：{error.code} {error.read().decode('utf-8', 'replace')}")
+        fail(f"GitHub API {method} {url} 失败：{error.code} "
+             f"{error.read().decode('utf-8', 'replace')}")
 
 
-def publish_api(project: Project, assets: list[Path], notes: str, draft: bool,
-                prerelease: bool, latest: bool, token: str) -> None:
-    repo = str(project.config.get("repo", "")).strip()
-    if not repo:
-        fail("descriptor 缺少 repo（owner/name）。")
+def publish_with_api(release: Release, assets: list[Path], notes: str, token: str) -> None:
     payload = json.dumps({
-        "tag_name": project.tag,
-        "target_commitish": str(project.config.get("branch", "master")),
-        "name": project.title,
+        "tag_name": release.tag,
+        "target_commitish": release.branch,
+        "name": release.title,
         "body": notes,
-        "draft": draft,
-        "prerelease": prerelease,
-        "make_latest": "true" if latest else "false",
+        "draft": bool(release.release_options.get("draft")),
+        "prerelease": bool(release.release_options.get("prerelease")),
+        "make_latest": "true" if release.release_options.get("latest", True) else "false",
     }).encode("utf-8")
-    response = api_request(f"https://api.github.com/repos/{repo}/releases", token, "POST", payload)
-    release = json.loads(response)
-    log(f"Release 已创建：{release.get('html_url')}")
-    upload_url = str(release["upload_url"]).split("{")[0]
+    response = api_request(f"{RELEASE_API}/repos/{release.repository}/releases",
+                           token, "POST", payload)
+    release_url = str(json.loads(response)["html_url"])
+    log(f"  已创建 Release：{release_url}")
+    upload_url = str(json.loads(response)["upload_url"]).split("{")[0]
     for item in assets:
-        content = item.read_bytes()
-        suffix = "&label=" + urllib.parse.quote(item.name)
-        api_request(upload_url + "?name=" + urllib.parse.quote(item.name) + suffix, token,
-                    "POST", content, "application/octet-stream")
-        log(f"已上传：{item.name}")
+        url = f"{upload_url}?name={urllib.parse.quote(item.name)}"
+        api_request(url, token, "POST", item.read_bytes(), "application/octet-stream")
+        log(f"  已上传：{item.name}")
+
+
+def publish_if_needed(release: Release) -> None:
+    if release_exists(release):
+        log(f"  Release {release.tag} 已存在，跳过")
+        return
+    assets = release.assets()
+    checksums = None if release.dry_run else write_checksums(release)
+    if checksums is not None:
+        assets.append(checksums)
+    notes = release.notes_text()
+    if release.dry_run:
+        log(f"  [计划] 创建 Release {release.tag}，上传 {len(assets)} 个附件")
+        if release.checksums_path() is not None:
+            log(f"  [计划] 生成校验文件：{release.checksums_path().relative_to(release.repo)}")
+        for item in assets:
+            log(f"    {item.relative_to(release.repo)}")
+        return
+    if gh_available():
+        publish_with_gh(release, assets, notes)
+        return
+    token = github_token()
+    if not token:
+        fail("没有 gh CLI，也没有 GH_TOKEN/GITHUB_TOKEN。"
+             "安装 gh（winget install --id GitHub.cli）后运行 gh auth login，"
+             "或设置 token 环境变量。")
+    publish_with_api(release, assets, notes, token)
+
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+def print_plan(release: Release, commit: str) -> None:
+    log(f"项目：{release.project}")
+    log(f"平台：{release.platform}")
+    log(f"版本：{release.version}")
+    log(f"标签：{release.tag} -> {commit[:12]}")
+    log(f"标题：{release.title}")
+    log(f"说明：{release.notes}")
+    log(f"附件：{len(release.assets())} 个")
+    if release.dry_run:
+        log("模式：dry-run（只打印计划，不修改任何内容）")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default="release.json",
-                        help="项目描述文件（默认仓库根目录 release.json）")
-    parser.add_argument("--platform", default="auto",
-                        help="平台：auto（默认）、windows、linux 或描述文件中的任意键")
-    parser.add_argument("--yes", action="store_true", help="确认执行 tag / publish")
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("plan", help="显示解析后的发布计划")
-    sub.add_parser("doctor", help="检查工作区、标签、回执、附件和发布工具")
-    sub.add_parser("build", help="执行描述文件里的构建命令")
-    tag = sub.add_parser("tag", help="创建（并可选推送）发布标签")
-    tag.add_argument("--push", action="store_true", help="创建后推送到远端")
-    tag.add_argument("--at", default="", help="覆盖描述文件里的 tag_commit")
-    pub = sub.add_parser("publish", help="创建 GitHub Release 并上传附件")
-    pub.add_argument("--dry-run", action="store_true", help="只显示动作，不上传")
-    pub.add_argument("--draft", action="store_true", default=None,
-                     help="创建草稿 Release")
-    pub.add_argument("--prerelease", action="store_true", default=None,
-                     help="标记预发布")
-    pub.add_argument("--latest", action="store_true", default=None,
-                     help="标记为最新版本")
-    sub.add_parser("all", help="doctor -> build -> tag --push -> publish")
-    options = parser.parse_args()
-
+    if len(sys.argv) > 1:
+        fail("这个脚本不需要参数。请修改仓库根目录的 release.json 后直接运行。")
     repo = repository_root()
-    project = load_project(repo, options.config, options.platform)
+    release = load_release(repo)
+    commit = release.tag_commit()
+    print_plan(release, commit)
+    log("\n[1/4] 检查仓库")
+    check_worktree(release)
+    check_tag_commit(release, commit)
 
-    if options.command == "plan":
-        describe(project)
-        return 0
-    if options.command == "doctor":
-        describe(project)
-        doctor(project)
-        return 0
-    if options.command == "build":
-        build(project)
-        return 0
-    if options.command == "tag":
-        create_tag(project, options.push, options.at, options.yes)
-        return 0
-    if options.command == "publish":
-        publish(project, options.dry_run, options.yes, options.draft,
-                options.prerelease, options.latest)
-        return 0
-    if options.command == "all":
-        describe(project)
-        doctor(project)
-        build(project)
-        doctor(project)
-        create_tag(project, push=True, override="", yes=options.yes)
-        publish(project, dry_run=False, yes=options.yes, draft=None,
-                prerelease=None, latest=None)
-        return 0
-    fail(f"未知命令：{options.command}")
-    return 1
+    log("\n[2/4] 构建产物")
+    build_if_needed(release, commit)
+
+    log("\n[3/4] 标签")
+    check_tag(release, commit, create=True)
+
+    log("\n[4/4] GitHub Release")
+    publish_if_needed(release)
+
+    log("\n完成。")
+    return 0
 
 
 if __name__ == "__main__":

@@ -35,19 +35,15 @@ python -B installer/windows/build.py
 
 ## 发布
 
-仓库根目录的 [release.json](release.json) 描述当前版本、标签、构建命令和发布附件；
-[tools/release/release.py](tools/release/release.py) 是跨平台的通用发布脚本（Windows 和
-Linux 共用）。发新版时修改描述文件里的版本号，然后：
+仓库根目录的 [release.json](release.json) 描述当前版本、标签、构建命令和发布附件。
+发新版时改里面的 `version`（以及按版本命名的发布说明文件），保存后运行一行命令：
 
 ~~~powershell
-python tools/release/release.py plan
-python tools/release/release.py doctor
-python tools/release/release.py build
-python tools/release/release.py tag --push --yes
-python tools/release/release.py publish --yes
+python tools/release/release.py
 ~~~
 
-详细字段和命令见 [tools/release/README.md](tools/release/README.md)。
+脚本会自动完成“检查 → 按需构建 → 按需打并推送 tag → 创建 GitHub Release 并上传附件”，
+重复运行会跳过已完成步骤。字段和前置条件见 [tools/release/README.md](tools/release/README.md)。
 
 ## 运行语义
 
